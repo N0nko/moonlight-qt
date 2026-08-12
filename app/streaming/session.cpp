@@ -34,6 +34,7 @@
 #define SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS 105
 #define SDL_CODE_CONNECTION_STATE_CHANGED 106
 #define SDL_CODE_FRAME_PRESENTED 107
+#define SDL_CODE_INITIALIZE_DECODER 110
 
 #include <QtEndian>
 #include <QCoreApplication>
@@ -44,6 +45,151 @@
 #include <QGuiApplication>
 #include <QCursor>
 #include <QScreen>
+#include <QByteArray>
+
+#ifdef HAS_X11
+#include <SDL_syswm.h>
+#include <X11/Xatom.h>
+#include <X11/Xlib.h>
+#endif
+
+namespace {
+QByteArray gamescopeControlDisplay()
+{
+    const QByteArray configured = qgetenv("MOONLIGHT_GAMESCOPE_CONTROL_DISPLAY");
+    return configured.isEmpty() ? QByteArray(":0") : configured;
+}
+
+class GamescopeFocusTracker
+{
+public:
+    explicit GamescopeFocusTracker(SDL_Window* window)
+        : m_Window(window),
+          m_HaveCachedFocus(false),
+          m_CachedFocus(false)
+#ifdef HAS_X11
+        , m_Display(nullptr),
+          m_RootWindow(0),
+          m_NativeWindow(0),
+          m_FocusedWindowAtom(0)
+#endif
+    {
+#ifdef HAS_X11
+        SDL_SysWMinfo info = {};
+        SDL_VERSION(&info.version);
+        if (!SDL_GetWindowWMInfo(window, &info) ||
+                info.subsystem != SDL_SYSWM_X11) {
+            return;
+        }
+
+        const QByteArray controlDisplay = gamescopeControlDisplay();
+        m_Display = XOpenDisplay(controlDisplay.constData());
+        if (m_Display == nullptr) {
+            return;
+        }
+
+        m_FocusedWindowAtom =
+                XInternAtom(m_Display, "GAMESCOPE_FOCUSED_WINDOW", True);
+        if (m_FocusedWindowAtom == 0) {
+            XCloseDisplay(m_Display);
+            m_Display = nullptr;
+            return;
+        }
+
+        m_NativeWindow = info.info.x11.window;
+        m_RootWindow = DefaultRootWindow(m_Display);
+        XSelectInput(m_Display, m_RootWindow, PropertyChangeMask);
+        refresh();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Gamescope focus gate active for native window %lu on %s",
+                    static_cast<unsigned long>(m_NativeWindow),
+                    controlDisplay.constData());
+#endif
+    }
+
+    ~GamescopeFocusTracker()
+    {
+#ifdef HAS_X11
+        if (m_Display != nullptr) {
+            XCloseDisplay(m_Display);
+        }
+#endif
+    }
+
+    bool isFocused()
+    {
+        const bool sdlFocused =
+                (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+
+#ifdef HAS_X11
+        if (m_Display == nullptr) {
+            return sdlFocused;
+        }
+
+        while (XPending(m_Display) > 0) {
+            XEvent event = {};
+            XNextEvent(m_Display, &event);
+            if (event.type == PropertyNotify &&
+                    event.xproperty.atom == m_FocusedWindowAtom) {
+                refresh();
+            }
+        }
+
+        return m_HaveCachedFocus ? m_CachedFocus : sdlFocused;
+#else
+        return sdlFocused;
+#endif
+    }
+
+private:
+#ifdef HAS_X11
+    void refresh()
+    {
+        Atom actualType = 0;
+        int actualFormat = 0;
+        unsigned long itemCount = 0;
+        unsigned long bytesAfter = 0;
+        unsigned char* data = nullptr;
+        const int status = XGetWindowProperty(
+                    m_Display,
+                    m_RootWindow,
+                    m_FocusedWindowAtom,
+                    0,
+                    1,
+                    False,
+                    XA_CARDINAL,
+                    &actualType,
+                    &actualFormat,
+                    &itemCount,
+                    &bytesAfter,
+                    &data);
+
+        m_HaveCachedFocus = false;
+        if (status == Success && actualType == XA_CARDINAL &&
+                actualFormat == 32 && itemCount == 1 && data != nullptr) {
+            const auto focusedWindow =
+                    static_cast<Window>(*reinterpret_cast<unsigned long*>(data));
+            m_CachedFocus = focusedWindow == m_NativeWindow;
+            m_HaveCachedFocus = true;
+        }
+
+        if (data != nullptr) {
+            XFree(data);
+        }
+    }
+#endif
+
+    SDL_Window* m_Window;
+    bool m_HaveCachedFocus;
+    bool m_CachedFocus;
+#ifdef HAS_X11
+    Display* m_Display;
+    Window m_RootWindow;
+    Window m_NativeWindow;
+    Atom m_FocusedWindowAtom;
+#endif
+};
+}
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 #include <QQuickOpenGLUtils>
@@ -1867,6 +2013,72 @@ bool Session::recreateVideoDecoder(bool flushEvents,
     return true;
 }
 
+bool Session::supportsLiveSettingsWindow() const
+{
+#ifdef HAS_X11
+    if (QGuiApplication::platformName() != "xcb") {
+        return false;
+    }
+
+    Display* display = XOpenDisplay(gamescopeControlDisplay().constData());
+    if (display == nullptr) {
+        return false;
+    }
+
+    const bool supported =
+            XInternAtom(display, "GAMESCOPE_FOCUSED_WINDOW", True) != 0 &&
+            XInternAtom(display, "GAMESCOPECTRL_BASELAYER_WINDOW", True) != 0;
+    XCloseDisplay(display);
+    return supported;
+#else
+    return false;
+#endif
+}
+
+bool Session::focusStreamWindow()
+{
+    if (m_Window == nullptr) {
+        return false;
+    }
+
+    if ((SDL_GetWindowFlags(m_Window) & SDL_WINDOW_MINIMIZED) != 0) {
+        SDL_RestoreWindow(m_Window);
+    }
+    SDL_ShowWindow(m_Window);
+    SDL_RaiseWindow(m_Window);
+
+#ifdef HAS_X11
+    SDL_SysWMinfo info = {};
+    SDL_VERSION(&info.version);
+    if (SDL_GetWindowWMInfo(m_Window, &info) &&
+            info.subsystem == SDL_SYSWM_X11) {
+        Display* display = XOpenDisplay(gamescopeControlDisplay().constData());
+        if (display != nullptr) {
+            const Atom focusAtom = XInternAtom(
+                        display, "GAMESCOPECTRL_BASELAYER_WINDOW", True);
+            if (focusAtom != 0) {
+                const unsigned long nativeWindow =
+                        static_cast<unsigned long>(info.info.x11.window);
+                XChangeProperty(display,
+                                DefaultRootWindow(display),
+                                focusAtom,
+                                XA_CARDINAL,
+                                32,
+                                PropModeReplace,
+                                reinterpret_cast<const unsigned char*>(&nativeWindow),
+                                1);
+                XFlush(display);
+            }
+            XCloseDisplay(display);
+        }
+    }
+#endif
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Requested focus for the stream window");
+    return true;
+}
+
 void Session::setShouldExit(bool quitHostApp)
 {
     // If the caller has explicitly asked us to quit the host app,
@@ -2108,14 +2320,53 @@ void Session::exec()
     m_LinuxLifecycleMonitor->start();
 #endif
 
-    // Hijack this thread to be the SDL main thread. We have to do this
-    // because we want to suspend all Qt processing until the stream is over.
-    SDL_Event event;
+    if (supportsLiveSettingsWindow()) {
+        focusStreamWindow();
+    }
+
+    // Queue decoder creation explicitly because Gamescope may omit the SDL
+    // window-shown event when another same-process window remains mapped.
+    SDL_Event initialDecoderEvent = {};
+    initialDecoderEvent.type = SDL_USEREVENT;
+    initialDecoderEvent.user.code = SDL_CODE_INITIALIZE_DECODER;
+    if (SDL_PushEvent(&initialDecoderEvent) != 1) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Unable to queue initial decoder creation");
+    }
+
+    // Keep the SDL stream loop authoritative while servicing Qt only when the
+    // secondary settings window actually has focus.
+    SDL_Event event = {};
+    GamescopeFocusTracker focusTracker(m_Window);
+    bool inputWasFocused = focusTracker.isFocused();
+    bool qtWindowActive = false;
+    Uint32 lastQtPump = 0;
+    auto pumpQtEvents = [&]() {
+        if (m_QtWindow == nullptr || !m_QtWindow->isVisible()) {
+            qtWindowActive = false;
+            return;
+        }
+
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+        QCoreApplication::sendPostedEvents();
+        lastQtPump = SDL_GetTicks();
+        qtWindowActive = m_QtWindow->isActive();
+    };
+
+    if (!inputWasFocused) {
+        pumpQtEvents();
+    }
+
     for (;;) {
         if (!processRecoveryEvents()) {
             goto DispatchDeferredCleanup;
         }
 
+        if (qtWindowActive && SDL_GetTicks() - lastQtPump >= 16) {
+            pumpQtEvents();
+        }
+
+        bool haveEvent = false;
 #if SDL_VERSION_ATLEAST(2, 0, 18) && !defined(STEAM_LINK)
         // SDL 2.0.18 has a proper wait event implementation that uses platform
         // support to block on events rather than polling on Windows, macOS, X11,
@@ -2132,16 +2383,17 @@ void Session::exec()
             eventTimeout = 1000;
         }
 #endif
-        if (!SDL_WaitEventTimeout(&event, eventTimeout)) {
-            presence.runCallbacks();
-            continue;
+        if (qtWindowActive && eventTimeout > 16) {
+            eventTimeout = 16;
         }
+        haveEvent = SDL_WaitEventTimeout(&event, eventTimeout) == 1;
 #else
         // We explicitly use SDL_PollEvent() and SDL_Delay() because
         // SDL_WaitEvent() has an internal SDL_Delay(10) inside which
         // blocks this thread too long for high polling rate mice and high
         // refresh rate displays.
-        if (!SDL_PollEvent(&event)) {
+        haveEvent = SDL_PollEvent(&event) == 1;
+        if (!haveEvent) {
 #ifndef STEAM_LINK
             SDL_Delay(1);
 #else
@@ -2149,10 +2401,40 @@ void Session::exec()
             // ARM core in the Steam Link, so we will wait 10 ms instead.
             SDL_Delay(10);
 #endif
-            presence.runCallbacks();
-            continue;
         }
 #endif
+
+        if (!haveEvent) {
+            presence.runCallbacks();
+        }
+
+        bool inputFocused = focusTracker.isFocused();
+#ifdef HAVE_LINUX_LIFECYCLE
+        inputFocused = inputFocused && !m_LifecycleSuspended.load();
+#endif
+        if (inputFocused != inputWasFocused) {
+            m_AudioMuted = m_Preferences->muteOnFocusLoss && !inputFocused;
+            if (inputFocused) {
+                m_InputHandler->notifyFocusGained();
+            }
+            else {
+                m_InputHandler->notifyFocusLost();
+                pumpQtEvents();
+            }
+            inputWasFocused = inputFocused;
+        }
+
+        if (!qtWindowActive && m_QtWindow != nullptr &&
+                m_QtWindow->isVisible() && m_QtWindow->isActive()) {
+            qtWindowActive = true;
+        }
+
+        if (!haveEvent) {
+            continue;
+        }
+
+        const bool gamepadInputFocused =
+                inputFocused || m_Preferences->backgroundGamepad;
         switch (event.type) {
         case SDL_QUIT:
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -2194,6 +2476,14 @@ void Session::exec()
                 m_InputHandler->setAdaptiveTriggers((uint16_t)(uintptr_t)event.user.data1,
                                                     (DualSenseOutputReport *)event.user.data2);
                 break;
+            case SDL_CODE_INITIALIZE_DECODER:
+                if (m_VideoDecoder == nullptr && !recreateVideoDecoder(true)) {
+                    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                                 "Failed to create the initial video decoder");
+                    emit displayLaunchError(tr("Unable to initialize video decoder. Please check your streaming settings and try again."));
+                    goto DispatchDeferredCleanup;
+                }
+                break;
             case SDL_CODE_CONNECTION_STATE_CHANGED:
             case SDL_CODE_FRAME_PRESENTED:
             case kSdlCodeExtensionMessage:
@@ -2212,16 +2502,8 @@ void Session::exec()
             // Early handling of some events
             switch (event.window.event) {
             case SDL_WINDOWEVENT_FOCUS_LOST:
-                if (m_Preferences->muteOnFocusLoss) {
-                    m_AudioMuted = true;
-                }
-                m_InputHandler->notifyFocusLost();
                 break;
             case SDL_WINDOWEVENT_FOCUS_GAINED:
-                if (m_Preferences->muteOnFocusLoss) {
-                    m_AudioMuted = false;
-                }
-                m_InputHandler->notifyFocusGained();
                 break;
             case SDL_WINDOWEVENT_LEAVE:
                 m_InputHandler->notifyMouseLeave();
@@ -2347,36 +2629,52 @@ void Session::exec()
 
         case SDL_KEYUP:
         case SDL_KEYDOWN:
-            presence.runCallbacks();
-            m_InputHandler->handleKeyEvent(&event.key);
+            if (inputFocused) {
+                presence.runCallbacks();
+                m_InputHandler->handleKeyEvent(&event.key);
+            }
             break;
         case SDL_MOUSEBUTTONDOWN:
         case SDL_MOUSEBUTTONUP:
-            presence.runCallbacks();
-            m_InputHandler->handleMouseButtonEvent(&event.button);
+            if (inputFocused) {
+                presence.runCallbacks();
+                m_InputHandler->handleMouseButtonEvent(&event.button);
+            }
             break;
         case SDL_MOUSEMOTION:
-            m_InputHandler->handleMouseMotionEvent(&event.motion);
+            if (inputFocused) {
+                m_InputHandler->handleMouseMotionEvent(&event.motion);
+            }
             break;
         case SDL_MOUSEWHEEL:
-            m_InputHandler->handleMouseWheelEvent(&event.wheel);
+            if (inputFocused) {
+                m_InputHandler->handleMouseWheelEvent(&event.wheel);
+            }
             break;
         case SDL_CONTROLLERAXISMOTION:
-            m_InputHandler->handleControllerAxisEvent(&event.caxis);
+            if (gamepadInputFocused) {
+                m_InputHandler->handleControllerAxisEvent(&event.caxis);
+            }
             break;
         case SDL_CONTROLLERBUTTONDOWN:
         case SDL_CONTROLLERBUTTONUP:
-            presence.runCallbacks();
-            m_InputHandler->handleControllerButtonEvent(&event.cbutton);
+            if (gamepadInputFocused) {
+                presence.runCallbacks();
+                m_InputHandler->handleControllerButtonEvent(&event.cbutton);
+            }
             break;
 #if SDL_VERSION_ATLEAST(2, 0, 14)
         case SDL_CONTROLLERSENSORUPDATE:
-            m_InputHandler->handleControllerSensorEvent(&event.csensor);
+            if (gamepadInputFocused) {
+                m_InputHandler->handleControllerSensorEvent(&event.csensor);
+            }
             break;
         case SDL_CONTROLLERTOUCHPADDOWN:
         case SDL_CONTROLLERTOUCHPADUP:
         case SDL_CONTROLLERTOUCHPADMOTION:
-            m_InputHandler->handleControllerTouchpadEvent(&event.ctouchpad);
+            if (gamepadInputFocused) {
+                m_InputHandler->handleControllerTouchpadEvent(&event.ctouchpad);
+            }
             break;
 #endif
 #if SDL_VERSION_ATLEAST(2, 24, 0)

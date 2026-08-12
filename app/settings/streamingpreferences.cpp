@@ -138,12 +138,12 @@ void StreamingPreferences::reload()
 #endif
 
     width = settings.value(SER_WIDTH, 1280).toInt();
-    height = settings.value(SER_HEIGHT, 720).toInt();
-    fps = settings.value(SER_FPS, 60).toInt();
+    height = settings.value(SER_HEIGHT, 800).toInt();
+    fps = settings.value(SER_FPS, 90).toInt();
     enableYUV444 = settings.value(SER_YUV444, false).toBool();
-    bitrateKbps = settings.value(SER_BITRATE, getDefaultBitrate(width, height, fps, enableYUV444)).toInt();
-    unlockBitrate = settings.value(SER_UNLOCK_BITRATE, false).toBool();
-    autoAdjustBitrate = settings.value(SER_AUTOADJUSTBITRATE, true).toBool();
+    bitrateKbps = settings.value(SER_BITRATE, 300000).toInt();
+    unlockBitrate = settings.value(SER_UNLOCK_BITRATE, true).toBool();
+    autoAdjustBitrate = settings.value(SER_AUTOADJUSTBITRATE, false).toBool();
     enableVsync = settings.value(SER_VSYNC, true).toBool();
     gameOptimizations = settings.value(SER_GAMEOPTS, true).toBool();
     playAudioOnHost = settings.value(SER_HOSTAUDIO, false).toBool();
@@ -202,7 +202,6 @@ void StreamingPreferences::reload()
             windowMode = WindowMode::WM_FULLSCREEN_DESKTOP;
         }
     }
-
     // Fixup VCC value to the new settings format with codec and HDR separate
     if (videoCodecConfig == VCC_FORCE_HEVC_HDR_DEPRECATED) {
         videoCodecConfig = VCC_AUTO;
@@ -442,6 +441,10 @@ void StreamingPreferences::handleLiveBitrateResult(quint32 requestId, int status
 
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool yuv444)
 {
+    if (width == 1280 && height == 800 && fps == 90) {
+        return 300000;
+    }
+
     // Don't scale bitrate linearly beyond 60 FPS. It's definitely not a linear
     // bitrate increase for frame rate once we get to values that high.
     float frameRateFactor = (fps <= 60 ? fps : (qSqrt(fps / 60.f) * 60.f)) / 30.f;

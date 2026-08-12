@@ -120,10 +120,51 @@ Flickable {
 
                 Label {
                     width: parent.width
+                    visible: window.streamingActive
+                    text: qsTr("Resolution and frame rate apply on the next stream. Bitrate applies live.")
+                    font.pointSize: 9
+                    wrapMode: Text.Wrap
+                    opacity: 0.8
+                }
+
+                Label {
+                    width: parent.width
                     id: resFPSdesc
                     text: qsTr("Setting values too high for your PC or network connection may cause lag, stuttering, or errors.")
                     font.pointSize: 9
                     wrapMode: Text.Wrap
+                }
+
+                Label {
+                    width: parent.width
+                    visible: window.streamingActive
+                    font.pointSize: 9
+                    wrapMode: Text.Wrap
+                    text: {
+                        if (StreamingPreferences.liveBitrateState === StreamingPreferences.LBS_PENDING)
+                            return qsTr("Applying to Sunshine...")
+                        if (StreamingPreferences.liveBitrateState === StreamingPreferences.LBS_APPLIED)
+                            return qsTr("Applied: %1 Mbps").arg(StreamingPreferences.appliedBitrateKbps / 1000.0)
+                        if (StreamingPreferences.liveBitrateState === StreamingPreferences.LBS_CLAMPED)
+                            return qsTr("Host cap applied: %1 Mbps").arg(StreamingPreferences.appliedBitrateKbps / 1000.0)
+                        if (StreamingPreferences.liveBitrateState === StreamingPreferences.LBS_UNSUPPORTED)
+                            return qsTr("The active encoder does not support live bitrate changes.")
+                        if (StreamingPreferences.liveBitrateState === StreamingPreferences.LBS_TIMED_OUT)
+                            return qsTr("Sunshine did not confirm the change; the stream stayed connected.")
+                        if (StreamingPreferences.liveBitrateState === StreamingPreferences.LBS_FAILED)
+                            return qsTr("Live update failed; the stream stayed connected and the value was saved.")
+                        return qsTr("Current stream target: %1 Mbps").arg(StreamingPreferences.bitrateKbps / 1000.0)
+                    }
+                }
+
+                Timer {
+                    id: liveBitrateTimer
+                    interval: 100
+                    repeat: false
+                    onTriggered: {
+                        if (window.streamingActive)
+                            StreamingPreferences.applyLiveBitrate()
+                    }
                 }
 
                 Row {
@@ -705,6 +746,7 @@ Flickable {
 
                         onMoved: {
                             StreamingPreferences.autoAdjustBitrate = false
+                            liveBitrateTimer.restart()
                         }
 
                         Component.onCompleted: {
@@ -720,8 +762,9 @@ Flickable {
                         onClicked: {
                             var defaultBitrate = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width, StreamingPreferences.height, StreamingPreferences.fps, StreamingPreferences.enableYUV444)
                             StreamingPreferences.bitrateKbps = defaultBitrate
-                            StreamingPreferences.autoAdjustBitrate = true
+                            StreamingPreferences.autoAdjustBitrate = false
                             slider.value = defaultBitrate
+                            liveBitrateTimer.restart()
                         }
                     }
                 }

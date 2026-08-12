@@ -7,6 +7,7 @@ import Session 1.0
 import SystemProperties 1.0
 
 Item {
+    id: streamSegue
     property Session session
     property string appName
     property string stageText : isResume ? qsTr("Resuming %1...").arg(appName) :
@@ -38,8 +39,14 @@ Item {
         stageLabel.visible = false
         hintText.visible = false
 
-        // Hide the window now that streaming has begun
-        window.visible = false
+        if (session.supportsLiveSettingsWindow()) {
+            // Map settings before SDL maps the stream. Gamescope ranks the newer
+            // stream window first and leaves settings as the secondary tab.
+            window.showStreamSettings(session)
+        }
+        else {
+            window.visible = false
+        }
     }
 
     function displayLaunchError(text)
@@ -61,6 +68,8 @@ Item {
 
     function sessionFinished(portTestResult)
     {
+        window.finishStreaming()
+
         if (portTestResult !== 0 && portTestResult !== -1 && streamSegueErrorDialog.text) {
             streamSegueErrorDialog.text += "\n\n" + qsTr("This PC's Internet connection is blocking Moonlight. Streaming over the Internet may not work while connected to this network.")
         }
@@ -70,6 +79,9 @@ Item {
 
         // Pop the StreamSegue off the stack if this is a GUI-based app launch
         if (!quitAfter) {
+            if (stackView.currentItem !== streamSegue) {
+                stackView.pop(streamSegue, StackView.Immediate)
+            }
             stackView.pop()
         }
 

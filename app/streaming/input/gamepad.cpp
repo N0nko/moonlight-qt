@@ -116,6 +116,92 @@ void SdlInputHandler::sendGamepadState(GamepadState* state)
                                rsY);
 }
 
+void SdlInputHandler::refreshAttachedGamepads(bool reannounce)
+{
+    int opened = 0;
+    const int joystickCount = SDL_NumJoysticks();
+    for (int deviceIndex = 0; deviceIndex < joystickCount; deviceIndex++) {
+        if (!SDL_IsGameController(deviceIndex)) {
+            continue;
+        }
+
+        const SDL_JoystickID instanceId = SDL_JoystickGetDeviceInstanceID(deviceIndex);
+        bool alreadyOpen = false;
+        for (const auto& state : m_GamepadState) {
+            if (state.controller != nullptr && state.jsId == instanceId) {
+                alreadyOpen = true;
+                break;
+            }
+        }
+        if (alreadyOpen) {
+            continue;
+        }
+
+        SDL_ControllerDeviceEvent event = {};
+        event.type = SDL_CONTROLLERDEVICEADDED;
+        event.which = deviceIndex;
+        handleControllerDeviceEvent(&event);
+        opened++;
+    }
+
+    if (reannounce) {
+        for (auto& state : m_GamepadState) {
+            if (state.controller != nullptr) {
+                sendGamepadState(&state);
+            }
+        }
+    }
+
+    if (opened != 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Recovered %d attached gamepad(s) by enumeration",
+                    opened);
+    }
+}
+
+void SdlInputHandler::raiseAllGamepadInputs()
+{
+    bool mouseEmulationDeactivated = false;
+    bool haveAttachedGamepad = false;
+
+    // Clear every pad first so single-controller merging cannot retain state.
+    for (auto& state : m_GamepadState) {
+        if (state.controller == nullptr) {
+            continue;
+        }
+
+        haveAttachedGamepad = true;
+        if (state.mouseEmulationTimer != 0) {
+            SDL_RemoveTimer(state.mouseEmulationTimer);
+            state.mouseEmulationTimer = 0;
+            mouseEmulationDeactivated = true;
+        }
+        state.buttons = 0;
+        state.lsX = state.lsY = 0;
+        state.rsX = state.rsY = 0;
+        state.lt = state.rt = 0;
+        state.lastStartDownTime = 0;
+        state.emulatedClickpadButtonDown = false;
+    }
+
+    if (mouseEmulationDeactivated && Session::get() != nullptr) {
+        Session::get()->notifyMouseEmulationMode(false);
+    }
+    if (!haveAttachedGamepad) {
+        return;
+    }
+
+    for (const auto& state : m_GamepadState) {
+        if (state.controller != nullptr) {
+            LiSendMultiControllerEvent(state.index, m_GamepadMask,
+                                       0, 0, 0, 0, 0, 0, 0);
+        }
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Released gamepad input after stream focus loss");
+}
+
 void SdlInputHandler::sendGamepadBatteryState(GamepadState* state, SDL_JoystickPowerLevel level)
 {
     if (!isInputForwardingEnabled()) {

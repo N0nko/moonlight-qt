@@ -12,6 +12,8 @@ import SdlGamepadKeyNavigation 1.0
 
 ApplicationWindow {
     property bool pollingActive: false
+    property bool streamingActive: false
+    property var streamingSession: null
 
     // Set by SettingsView to force the back operation to pop all
     // pages except the initial view. This is required when doing
@@ -19,8 +21,9 @@ ApplicationWindow {
     property bool clearOnBack: false
 
     id: window
+    title: streamingActive ? qsTr("Moonlight Stream Settings") : qsTr("Moonlight")
     width: 1280
-    height: 600
+    height: streamingActive ? 800 : 600
 
     // This function runs prior to creation of the initial StackView item
     function doEarlyInit() {
@@ -96,6 +99,14 @@ ApplicationWindow {
     ToolTip.toolTip.contentWidth: Math.min(tooltipTextLayoutHelper.width, 400)
 
     function goBack() {
+        if (streamingActive && stackView.currentItem instanceof SettingsView) {
+            window.lower()
+            if (streamingSession !== null) {
+                streamingSession.focusStreamWindow()
+            }
+            return
+        }
+
         if (clearOnBack) {
             // Pop all items except the first one
             stackView.pop(null)
@@ -103,6 +114,28 @@ ApplicationWindow {
         }
         else {
             stackView.pop()
+        }
+    }
+
+    function showStreamSettings(activeSession) {
+        streamingActive = true
+        streamingSession = activeSession
+        inactivityTimer.stop()
+        if (pollingActive) {
+            ComputerManager.stopPollingAsync()
+            pollingActive = false
+        }
+        settingsButton.clicked()
+        window.visible = true
+        window.lower()
+    }
+
+    function finishStreaming() {
+        streamingActive = false
+        streamingSession = null
+        if (visible && active && !pollingActive) {
+            ComputerManager.startPolling()
+            pollingActive = true
         }
     }
 
@@ -181,12 +214,12 @@ ApplicationWindow {
                 pollingActive = false
             }
         }
-        else if (active) {
+        else if (active && !streamingActive) {
             // When we become visible and active again, start polling
             inactivityTimer.stop()
 
             // Restart polling if it was stopped
-            if (!pollingActive) {
+            if (!streamingActive && !pollingActive) {
                 ComputerManager.startPolling()
                 pollingActive = true
             }
@@ -202,12 +235,12 @@ ApplicationWindow {
             inactivityTimer.stop()
 
             // Restart polling if it was stopped
-            if (!pollingActive) {
+            if (!streamingActive && !pollingActive) {
                 ComputerManager.startPolling()
                 pollingActive = true
             }
         }
-        else {
+        else if (!streamingActive) {
             // Start the inactivity timer to stop polling
             // if focus does not return within a few minutes.
             inactivityTimer.restart()

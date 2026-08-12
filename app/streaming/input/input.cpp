@@ -11,6 +11,7 @@
 
 SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, int streamHeight)
     : m_MultiController(prefs.multiController),
+      m_BackgroundGamepad(prefs.backgroundGamepad),
       m_GamepadMouse(prefs.gamepadMouse),
       m_SwapMouseButtons(prefs.swapMouseButtons),
       m_ReverseScrollDirection(prefs.reverseScrollDirection),
@@ -54,8 +55,11 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
         SDL_SetHint(SDL_HINT_MOUSE_AUTO_CAPTURE, "0");
     }
 
-    // Allow gamepad input when the app doesn't have focus if requested
-    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, prefs.backgroundGamepad ? "1" : "0");
+    // Gamescope's compositing focus can differ from X11 focus. Always collect
+    // controller events and gate host-bound input using Gamescope focus below.
+    SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,
+                            "1",
+                            SDL_HINT_OVERRIDE);
 
 #if !SDL_VERSION_ATLEAST(2, 0, 15)
     // For older versions of SDL (2.0.14 and earlier), use SDL_HINT_GRAB_KEYBOARD
@@ -295,12 +299,21 @@ void SdlInputHandler::setInputForwardingEnabled(bool enabled)
 {
     const bool wasEnabled = m_InputForwardingEnabled.exchange(
                 enabled, std::memory_order_relaxed);
-    if (!wasEnabled || enabled) {
+    if (wasEnabled == enabled) {
         return;
     }
 
-    // Release keyboard state through the old generation, then prevent any
-    // pending touch or mouse-emulation timers from reaching common-c.
+    if (enabled) {
+        refreshAttachedGamepads(true);
+        return;
+    }
+
+    // Neutralize the old connection generation before common-c tears it down.
+    releaseHostInput(true);
+}
+
+void SdlInputHandler::releaseHostInput(bool releaseGamepads)
+{
     raiseAllKeys();
 
     SDL_RemoveTimer(m_LongPressTimer);
@@ -311,25 +324,21 @@ void SdlInputHandler::setInputForwardingEnabled(bool enabled)
     m_LeftButtonReleaseTimer = 0;
     m_RightButtonReleaseTimer = 0;
     m_DragTimer = 0;
+    m_DragButton = 0;
     m_NumFingersDown = 0;
     SDL_zero(m_LastTouchDownEvent);
     SDL_zero(m_LastTouchUpEvent);
     SDL_zero(m_TouchDownEvent);
 
-    for (auto& state : m_GamepadState) {
-        if (state.mouseEmulationTimer != 0) {
-            SDL_RemoveTimer(state.mouseEmulationTimer);
-            state.mouseEmulationTimer = 0;
-            if (Session::get() != nullptr) {
-                Session::get()->notifyMouseEmulationMode(false);
-            }
-        }
+    LiSendTouchEvent(LI_TOUCH_EVENT_CANCEL_ALL, 0, 0, 0, 0, 0, 0, 0);
+    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_MIDDLE);
+    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_X1);
+    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_X2);
 
-        state.buttons = 0;
-        state.lsX = state.lsY = 0;
-        state.rsX = state.rsY = 0;
-        state.lt = state.rt = 0;
-        state.emulatedClickpadButtonDown = false;
+    if (releaseGamepads) {
+        raiseAllGamepadInputs();
     }
 }
 
@@ -370,9 +379,7 @@ void SdlInputHandler::notifyFocusLost()
         setCaptureActive(false);
     }
 
-    // Raise all keys that are currently pressed. If we don't do this, certain keys
-    // used in shortcuts that cause focus loss (such as Alt+Tab) may get stuck down.
-    raiseAllKeys();
+    releaseHostInput(!m_BackgroundGamepad);
 }
 
 void SdlInputHandler::notifyFocusGained()
