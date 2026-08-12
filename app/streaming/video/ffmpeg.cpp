@@ -1889,6 +1889,32 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     SDL_assert(m_FrameInfoQueue.size() == m_FramesIn - m_FramesOut);
                     m_FramesOut++;
 
+#ifdef HAVE_LIBVA
+                    const bool corruptAv1VaapiFrame =
+                            (m_VideoFormat & VIDEO_FORMAT_MASK_AV1) &&
+                            m_HwDecodeCfg != nullptr &&
+                            m_HwDecodeCfg->device_type == AV_HWDEVICE_TYPE_VAAPI &&
+                            ((frame->flags & AV_FRAME_FLAG_CORRUPT) != 0 ||
+                             frame->decode_error_flags != 0);
+                    if (corruptAv1VaapiFrame) {
+                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                    "Dropping corrupt AV1 VAAPI frame %d (flags: 0x%x, decode errors: 0x%x)",
+                                    m_FrameInfoQueue.isEmpty() ? -1 : m_FrameInfoQueue.head().frameNumber,
+                                    static_cast<unsigned int>(frame->flags),
+                                    static_cast<unsigned int>(frame->decode_error_flags));
+
+                        // Flush the poisoned references and reject all new
+                        // interframes until the host supplies a clean IDR.
+                        av_frame_free(&frame);
+                        avcodec_flush_buffers(m_VideoDecoderCtx);
+                        m_FrameInfoQueue.clear();
+                        m_FramesIn = m_FramesOut = 0;
+                        m_ConsecutiveFailedDecodes = 0;
+                        LiRequestIdrFrame();
+                        continue;
+                    }
+#endif
+
                     // Attach HDR metadata to the frame if it's not already present. We will defer to
                     // any metadata contained in the bitstream itself since that is guaranteed to be
                     // correctly synchronized to each frame, unlike our async HDR metadata message.
