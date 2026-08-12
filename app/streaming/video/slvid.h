@@ -43,4 +43,6 @@ private:
 
     int m_ViewportWidth;
     int m_ViewportHeight;
+    DecoderFramePresentedCallback m_FramePresentedCallback;
+    void* m_FramePresentedContext;
 };

@@ -6,7 +6,9 @@ SLVideoDecoder::SLVideoDecoder(bool)
       m_VideoStream(nullptr),
       m_Overlay(nullptr),
       m_ViewportWidth(0),
-      m_ViewportHeight(0)
+      m_ViewportHeight(0),
+      m_FramePresentedCallback(nullptr),
+      m_FramePresentedContext(nullptr)
 {
     SLVideo_SetLogFunction(SLVideoDecoder::slLogCallback, nullptr);
 }
@@ -111,6 +113,8 @@ SLVideoDecoder::initialize(PDECODER_PARAMETERS params)
     SLVideo_SetStreamTargetFramerate(m_VideoStream, params->frameRate, 1);
 
     SDL_GetWindowSize(params->window, &m_ViewportWidth, &m_ViewportHeight);
+    m_FramePresentedCallback = params->framePresentedCallback;
+    m_FramePresentedContext = params->framePresentedContext;
 
     // Register ourselves for overlay callbacks
     Session* session = Session::get();
@@ -164,6 +168,12 @@ SLVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
         // Need an IDR frame to resync
         return DR_NEED_IDR;
+    }
+
+    if (m_FramePresentedCallback != nullptr) {
+        DecoderFramePresentedCallback callback = m_FramePresentedCallback;
+        m_FramePresentedCallback = nullptr;
+        callback(m_FramePresentedContext);
     }
 
     return DR_OK;
