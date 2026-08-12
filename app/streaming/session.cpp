@@ -2363,6 +2363,7 @@ void Session::exec()
     };
 
     if (!inputWasFocused) {
+        m_InputHandler->notifyFocusLost();
         pumpQtEvents();
     }
 

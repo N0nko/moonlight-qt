@@ -16,7 +16,8 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
       m_SwapMouseButtons(prefs.swapMouseButtons),
       m_ReverseScrollDirection(prefs.reverseScrollDirection),
       m_SwapFaceButtons(prefs.swapFaceButtons),
-      m_InputForwardingEnabled(true),
+      m_TransportForwardingEnabled(true),
+      m_StreamInputFocused(true),
       m_MouseWasInVideoRegion(false),
       m_PendingMouseButtonsAllUpOnVideoRegionLeave(false),
       m_PointerRegionLockActive(false),
@@ -297,19 +298,21 @@ void SdlInputHandler::raiseAllKeys()
 
 void SdlInputHandler::setInputForwardingEnabled(bool enabled)
 {
-    const bool wasEnabled = m_InputForwardingEnabled.exchange(
+    const bool wasEnabled = m_TransportForwardingEnabled.exchange(
                 enabled, std::memory_order_relaxed);
     if (wasEnabled == enabled) {
         return;
     }
 
-    if (enabled) {
-        refreshAttachedGamepads(true);
+    if (!enabled) {
+        // Neutralize the old connection generation before common-c tears it down.
+        releaseHostInput(true);
         return;
     }
 
-    // Neutralize the old connection generation before common-c tears it down.
-    releaseHostInput(true);
+    if (isGamepadForwardingEnabled()) {
+        refreshAttachedGamepads(true);
+    }
 }
 
 void SdlInputHandler::releaseHostInput(bool releaseGamepads)
@@ -344,7 +347,15 @@ void SdlInputHandler::releaseHostInput(bool releaseGamepads)
 
 bool SdlInputHandler::isInputForwardingEnabled() const
 {
-    return m_InputForwardingEnabled.load(std::memory_order_relaxed);
+    return m_TransportForwardingEnabled.load(std::memory_order_relaxed) &&
+            m_StreamInputFocused.load(std::memory_order_relaxed);
+}
+
+bool SdlInputHandler::isGamepadForwardingEnabled() const
+{
+    return m_TransportForwardingEnabled.load(std::memory_order_relaxed) &&
+            (m_StreamInputFocused.load(std::memory_order_relaxed) ||
+             m_BackgroundGamepad);
 }
 
 void SdlInputHandler::notifyMouseLeave()
@@ -371,6 +382,9 @@ void SdlInputHandler::notifyMouseLeave()
 
 void SdlInputHandler::notifyFocusLost()
 {
+    const bool wasFocused = m_StreamInputFocused.exchange(
+                false, std::memory_order_relaxed);
+
     // Release mouse cursor when another window is activated (e.g. by using ALT+TAB).
     // This lets user to interact with our window's title bar and with the buttons in it.
     // Doing this while the window is full-screen breaks the transition out of FS
@@ -379,11 +393,20 @@ void SdlInputHandler::notifyFocusLost()
         setCaptureActive(false);
     }
 
-    releaseHostInput(!m_BackgroundGamepad);
+    if (wasFocused &&
+            m_TransportForwardingEnabled.load(std::memory_order_relaxed)) {
+        releaseHostInput(!m_BackgroundGamepad);
+    }
 }
 
 void SdlInputHandler::notifyFocusGained()
 {
+    const bool wasFocused = m_StreamInputFocused.exchange(
+                true, std::memory_order_relaxed);
+    if (!wasFocused && !m_BackgroundGamepad &&
+            m_TransportForwardingEnabled.load(std::memory_order_relaxed)) {
+        refreshAttachedGamepads(true);
+    }
 }
 
 bool SdlInputHandler::isCaptureActive()
