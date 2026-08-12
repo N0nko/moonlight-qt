@@ -152,6 +152,14 @@ jobs:
           wget https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy*.AppImage
 
+      - name: Test stream recovery policy
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            app/streaming/lifecycle/recoverypolicy.cpp \
+            tests/recoverypolicy_test.cpp \
+            -o /tmp/recoverypolicy-test
+          /tmp/recoverypolicy-test
+
       - name: Build Binaries
         run: |
           sudo ldconfig
