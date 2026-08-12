@@ -25,6 +25,7 @@
 #define SER_VSYNC "vsync"
 #define SER_GAMEOPTS "gameopts"
 #define SER_HOSTAUDIO "hostaudio"
+#define SER_DECKMICROPHONE "deckmicrophone"
 #define SER_MULTICONT "multicontroller"
 #define SER_AUDIOCFG "audiocfg"
 #define SER_VIDEOCFG "videocfg"
@@ -163,6 +164,7 @@ void StreamingPreferences::reload()
     enableVsync = settings.value(SER_VSYNC, true).toBool();
     gameOptimizations = settings.value(SER_GAMEOPTS, true).toBool();
     playAudioOnHost = settings.value(SER_HOSTAUDIO, false).toBool();
+    deckMicrophone = settings.value(SER_DECKMICROPHONE, true).toBool();
     multiController = settings.value(SER_MULTICONT, true).toBool();
     enableMdns = settings.value(SER_MDNS, true).toBool();
     quitAppAfter = settings.value(SER_QUITAPPAFTER, false).toBool();
@@ -364,6 +366,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_VSYNC, enableVsync);
     settings.setValue(SER_GAMEOPTS, gameOptimizations);
     settings.setValue(SER_HOSTAUDIO, playAudioOnHost);
+    settings.setValue(SER_DECKMICROPHONE, deckMicrophone);
     settings.setValue(SER_MULTICONT, multiController);
     settings.setValue(SER_MDNS, enableMdns);
     settings.setValue(SER_QUITAPPAFTER, quitAppAfter);
@@ -468,6 +471,14 @@ bool StreamingPreferences::applyRemoteDisplayPolicy()
     save();
     Session* session = Session::get();
     return session == nullptr || session->applyRemoteDisplayPolicy();
+}
+
+bool StreamingPreferences::applyDeckMicrophone()
+{
+    save();
+    Session* session = Session::get();
+    return session != nullptr &&
+           session->setDeckMicrophoneEnabled(deckMicrophone);
 }
 
 void StreamingPreferences::handleLiveBitrateResult(quint32 requestId, int status,

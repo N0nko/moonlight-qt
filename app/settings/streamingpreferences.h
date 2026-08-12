@@ -23,6 +23,8 @@ public:
 
     Q_INVOKABLE bool applyRemoteDisplayPolicy();
 
+    Q_INVOKABLE bool applyDeckMicrophone();
+
     void reload();
 
     enum AudioConfig
@@ -172,6 +174,7 @@ public:
     Q_PROPERTY(bool enableVsync MEMBER enableVsync NOTIFY enableVsyncChanged)
     Q_PROPERTY(bool gameOptimizations MEMBER gameOptimizations NOTIFY gameOptimizationsChanged)
     Q_PROPERTY(bool playAudioOnHost MEMBER playAudioOnHost NOTIFY playAudioOnHostChanged)
+    Q_PROPERTY(bool deckMicrophone MEMBER deckMicrophone NOTIFY deckMicrophoneChanged)
     Q_PROPERTY(bool multiController MEMBER multiController NOTIFY multiControllerChanged)
     Q_PROPERTY(bool enableMdns MEMBER enableMdns NOTIFY enableMdnsChanged)
     Q_PROPERTY(bool quitAppAfter MEMBER quitAppAfter NOTIFY quitAppAfterChanged)
@@ -220,6 +223,7 @@ public:
     bool enableVsync;
     bool gameOptimizations;
     bool playAudioOnHost;
+    bool deckMicrophone;
     bool multiController;
     bool enableMdns;
     bool quitAppAfter;
@@ -262,6 +266,7 @@ signals:
     void enableVsyncChanged();
     void gameOptimizationsChanged();
     void playAudioOnHostChanged();
+    void deckMicrophoneChanged();
     void multiControllerChanged();
     void unsupportedFpsChanged();
     void enableMdnsChanged();

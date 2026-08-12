@@ -55,5 +55,25 @@ int main()
     CHECK(!DeckProtocol::parseDisplayResult(displayResponse.data(),
                                             displayResponse.size(),
                                             &displayResult));
+
+    const auto microphoneConfig = DeckProtocol::makeMicrophoneConfiguration(true);
+    CHECK(microphoneConfig[0] == 1);
+    CHECK(microphoneConfig[1] == DeckProtocol::DeckMicrophoneOpusCodec);
+    CHECK(microphoneConfig[2] == DeckProtocol::DeckMicrophoneChannels);
+    CHECK(DeckProtocol::readLe32(microphoneConfig.data() + 4) ==
+          DeckProtocol::DeckMicrophoneSampleRate);
+
+    std::array<std::uint8_t, 4> microphoneResponse {};
+    microphoneResponse[0] = static_cast<std::uint8_t>(
+                DeckProtocol::MicrophoneStatus::Active);
+    DeckProtocol::MicrophoneStatus microphoneStatus {};
+    CHECK(DeckProtocol::parseMicrophoneStatus(microphoneResponse.data(),
+                                              microphoneResponse.size(),
+                                              &microphoneStatus));
+    CHECK(microphoneStatus == DeckProtocol::MicrophoneStatus::Active);
+    microphoneResponse[3] = 1;
+    CHECK(!DeckProtocol::parseMicrophoneStatus(microphoneResponse.data(),
+                                               microphoneResponse.size(),
+                                               &microphoneStatus));
     return EXIT_SUCCESS;
 }

@@ -1,23 +1,26 @@
 #include "sdl.h"
+#include "streaming/audio/sdlaudiosubsystem.h"
 
 #include <Limelight.h>
 
 SdlAudioRenderer::SdlAudioRenderer()
     : m_AudioDevice(0),
+      m_AudioSubsystemReference(SdlAudioSubsystem::acquire()),
       m_AudioBuffer(nullptr)
 {
-    SDL_assert(!SDL_WasInit(SDL_INIT_AUDIO));
-
-    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+    if (!m_AudioSubsystemReference) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "SDL_InitSubSystem(SDL_INIT_AUDIO) failed: %s",
                      SDL_GetError());
-        SDL_assert(SDL_WasInit(SDL_INIT_AUDIO));
     }
 }
 
 bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* opusConfig)
 {
+    if (!m_AudioSubsystemReference) {
+        return false;
+    }
+
     SDL_AudioSpec want, have;
 
     SDL_zero(want);
@@ -84,8 +87,9 @@ SdlAudioRenderer::~SdlAudioRenderer()
         SDL_free(m_AudioBuffer);
     }
 
-    SDL_QuitSubSystem(SDL_INIT_AUDIO);
-    SDL_assert(!SDL_WasInit(SDL_INIT_AUDIO));
+    if (m_AudioSubsystemReference) {
+        SdlAudioSubsystem::release();
+    }
 }
 
 void* SdlAudioRenderer::getAudioBuffer(int*)
