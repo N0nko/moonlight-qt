@@ -28,6 +28,13 @@ public:
 };
 Q_DECLARE_TYPEINFO(NvDisplayMode, Q_PRIMITIVE_TYPE);
 
+struct NvStartAppOptions
+{
+    int timeoutMs = 0;
+    bool reconnect = false;
+    bool fastResume = false;
+};
+
 class GfeHttpResponseException : public std::exception
 {
 public:
@@ -170,7 +177,8 @@ public:
              bool localAudio,
              int gamepadMask,
              bool persistGameControllersOnDisconnect,
-             QString& rtspSessionUrl);
+             QString& rtspSessionUrl,
+             const NvStartAppOptions& options = NvStartAppOptions());
 
     QVector<NvApp>
     getAppList();
