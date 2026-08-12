@@ -28,6 +28,10 @@ void SdlInputHandler::notifyMouseLeave()
 
 void SdlInputHandler::handleMouseButtonEvent(SDL_MouseButtonEvent* event)
 {
+    if (!isInputForwardingEnabled()) {
+        return;
+    }
+
     int button;
 
     if (event->which == SDL_TOUCH_MOUSEID) {
@@ -92,6 +96,10 @@ void SdlInputHandler::handleMouseButtonEvent(SDL_MouseButtonEvent* event)
 
 void SdlInputHandler::handleMouseMotionEvent(SDL_MouseMotionEvent* event)
 {
+    if (!isInputForwardingEnabled()) {
+        return;
+    }
+
     if (!isCaptureActive()) {
         // Not capturing
         return;
@@ -180,6 +188,10 @@ void SdlInputHandler::handleMouseMotionEvent(SDL_MouseMotionEvent* event)
 
 void SdlInputHandler::handleMouseWheelEvent(SDL_MouseWheelEvent* event)
 {
+    if (!isInputForwardingEnabled()) {
+        return;
+    }
+
     if (!isCaptureActive()) {
         // Not capturing
         return;

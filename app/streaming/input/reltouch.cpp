@@ -14,14 +14,24 @@
 // How far the finger can move before it cancels a drag or tap
 #define DEAD_ZONE_DELTA 0.01f
 
-Uint32 SdlInputHandler::releaseLeftButtonTimerCallback(Uint32, void*)
+Uint32 SdlInputHandler::releaseLeftButtonTimerCallback(Uint32, void* context)
 {
+    auto handler = static_cast<SdlInputHandler*>(context);
+    if (!handler->isInputForwardingEnabled()) {
+        return 0;
+    }
+
     LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
     return 0;
 }
 
-Uint32 SdlInputHandler::releaseRightButtonTimerCallback(Uint32, void*)
+Uint32 SdlInputHandler::releaseRightButtonTimerCallback(Uint32, void* context)
 {
+    auto handler = static_cast<SdlInputHandler*>(context);
+    if (!handler->isInputForwardingEnabled()) {
+        return 0;
+    }
+
     LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
     return 0;
 }
@@ -29,6 +39,10 @@ Uint32 SdlInputHandler::releaseRightButtonTimerCallback(Uint32, void*)
 Uint32 SdlInputHandler::dragTimerCallback(Uint32, void *param)
 {
     auto me = reinterpret_cast<SdlInputHandler*>(param);
+
+    if (!me->isInputForwardingEnabled()) {
+        return 0;
+    }
 
     // Check how many fingers are down now to decide
     // which button to hold down
@@ -46,6 +60,10 @@ Uint32 SdlInputHandler::dragTimerCallback(Uint32, void *param)
 
 void SdlInputHandler::handleRelativeFingerEvent(SDL_TouchFingerEvent* event)
 {
+    if (!isInputForwardingEnabled()) {
+        return;
+    }
+
     int fingerIndex = -1;
 
     // Observations on Windows 10: x and y appear to be relative to 0,0 of the window client area.
@@ -149,7 +167,7 @@ void SdlInputHandler::handleRelativeFingerEvent(SDL_TouchFingerEvent* event)
             SDL_RemoveTimer(m_RightButtonReleaseTimer);
             m_RightButtonReleaseTimer = SDL_AddTimer(TAP_BUTTON_RELEASE_DELAY,
                                                      releaseRightButtonTimerCallback,
-                                                     nullptr);
+                                                     this);
         }
         // 1 finger tap
         else if (event->timestamp - m_TouchDownEvent[0].timestamp < 250) {
@@ -160,7 +178,7 @@ void SdlInputHandler::handleRelativeFingerEvent(SDL_TouchFingerEvent* event)
             SDL_RemoveTimer(m_LeftButtonReleaseTimer);
             m_LeftButtonReleaseTimer = SDL_AddTimer(TAP_BUTTON_RELEASE_DELAY,
                                                     releaseLeftButtonTimerCallback,
-                                                    nullptr);
+                                                    this);
         }
     }
 
