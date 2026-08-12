@@ -8,6 +8,8 @@
 
 #define MAX_SLICES 4
 
+typedef void(*DecoderFramePresentedCallback)(void* context);
+
 typedef struct _VIDEO_STATS {
     uint32_t receivedFrames;
     uint32_t decodedFrames;
@@ -45,6 +47,8 @@ typedef struct _DECODER_PARAMETERS {
     bool enableVsync;
     bool enableFramePacing;
     bool testOnly;
+    DecoderFramePresentedCallback framePresentedCallback;
+    void* framePresentedContext;
 } DECODER_PARAMETERS, *PDECODER_PARAMETERS;
 
 #define WINDOW_STATE_CHANGE_SIZE 0x01
