@@ -202,6 +202,7 @@ SOURCES += \
     streaming/lifecycle/recoverypolicy.cpp \
     streaming/lifecycle/recoverysettings.cpp \
     streaming/lifecycle/sessionrecovery.cpp \
+    streaming/extensions/deckextensions.cpp \
     streaming/session.cpp \
     streaming/audio/audio.cpp \
     streaming/audio/renderers/sdlaud.cpp \
@@ -242,6 +243,7 @@ HEADERS += \
     streaming/lifecycle/connectionstartthread.h \
     streaming/lifecycle/recoverypolicy.h \
     streaming/lifecycle/recoverysettings.h \
+    streaming/extensions/deckprotocol.h \
     streaming/session.h \
     streaming/audio/renderers/renderer.h \
     streaming/audio/renderers/sdl.h \

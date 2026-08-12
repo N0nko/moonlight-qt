@@ -2,6 +2,7 @@
 
 #include <QSemaphore>
 #include <QQuickWindow>
+#include <QtGlobal>
 
 #include <Limelight.h>
 #include <opus_multistream.h>
@@ -14,8 +15,13 @@
 #include "video/overlaymanager.h"
 
 #include <atomic>
+#include <cstdint>
+#include <deque>
+#include <mutex>
+#include <vector>
 
 class QThread;
+constexpr int kSdlCodeExtensionMessage = 109;
 #ifdef HAVE_LINUX_LIFECYCLE
 class LinuxLifecycleMonitor;
 constexpr int kSdlCodeLifecycleStateChanged = 108;
@@ -133,6 +139,8 @@ public:
 
     void flushWindowEvents();
 
+    bool requestLiveBitrate(int bitrateKbps, quint32* requestId);
+
     void setShouldExit(bool quitHostApp = false);
 
 signals:
@@ -152,6 +160,8 @@ signals:
     void readyForDeletion();
 
     void launchWarningsChanged();
+
+    void liveBitrateResult(quint32 requestId, int status, int appliedBitrateKbps);
 
 private:
     void exec();
@@ -174,6 +184,8 @@ private:
     bool applyRecoveryAction(RecoveryPolicy::Action action);
 
     void finishRecovery();
+
+    void processExtensionMessages();
 
 #ifdef HAVE_LINUX_LIFECYCLE
     void queueLifecycleSleepState(bool sleeping);
@@ -271,6 +283,10 @@ private:
     void clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlags, uint8_t typeLeft, uint8_t typeRight, uint8_t *left, uint8_t *right);
 
     static
+    void clExtensionMessage(uint8_t feature, uint8_t opcode, uint32_t requestId,
+                            const uint8_t* payload, uint16_t payloadLength);
+
+    static
     int arInit(int audioConfiguration,
                const POPUS_MULTISTREAM_CONFIGURATION opusConfig,
                void* arContext, int arFlags);
@@ -330,6 +346,17 @@ private:
     std::atomic_bool m_NetworkUnavailable;
 #endif
     std::atomic_bool m_EventLoopRunning;
+    struct PendingExtensionMessage {
+        uint8_t feature;
+        uint8_t opcode;
+        uint32_t requestId;
+        std::vector<uint8_t> payload;
+    };
+    std::mutex m_ExtensionMutex;
+    std::deque<PendingExtensionMessage> m_ExtensionMessages;
+    std::atomic_bool m_ExtensionMessageQueued;
+    std::atomic_uint32_t m_NextExtensionRequestId;
+    std::atomic_int m_DesiredBitrateKbps;
     std::atomic_bool m_RecoveryMode;
     std::atomic_bool m_ConnectionLossQueued;
     std::atomic_bool m_FramePresentedQueued;

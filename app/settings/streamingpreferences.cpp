@@ -1,4 +1,6 @@
 #include "streamingpreferences.h"
+#include "streaming/extensions/deckprotocol.h"
+#include "streaming/session.h"
 #include "utils.h"
 
 #include <QSettings>
@@ -60,8 +62,21 @@ static StreamingPreferences* s_GlobalPrefs;
 Q_GLOBAL_STATIC(QReadWriteLock, s_GlobalPrefsLock)
 
 StreamingPreferences::StreamingPreferences(QQmlEngine *qmlEngine)
-    : m_QmlEngine(qmlEngine)
+    : m_QmlEngine(qmlEngine),
+      m_LiveBitrateRequestId(0)
 {
+    liveBitrateState = LBS_IDLE;
+    appliedBitrateKbps = 0;
+    m_LiveBitrateTimeout.setSingleShot(true);
+    m_LiveBitrateTimeout.setInterval(2000);
+    connect(&m_LiveBitrateTimeout, &QTimer::timeout, this, [this]() {
+        if (liveBitrateState == LBS_PENDING) {
+            liveBitrateState = LBS_TIMED_OUT;
+            appliedBitrateKbps = 0;
+            m_LiveBitrateRequestId = 0;
+            emit liveBitrateStatusChanged();
+        }
+    });
     reload();
 }
 
@@ -362,6 +377,67 @@ void StreamingPreferences::save()
     settings.setValue(SER_SWAPFACEBUTTONS, swapFaceButtons);
     settings.setValue(SER_CAPTURESYSKEYS, captureSysKeysMode);
     settings.setValue(SER_KEEPAWAKE, keepAwake);
+}
+
+bool StreamingPreferences::applyLiveBitrate()
+{
+    m_LiveBitrateTimeout.stop();
+    m_LiveBitrateRequestId = 0;
+    save();
+
+    Session* session = Session::get();
+    quint32 requestId = 0;
+    if (session == nullptr) {
+        liveBitrateState = LBS_FAILED;
+        appliedBitrateKbps = 0;
+        emit liveBitrateStatusChanged();
+        return false;
+    }
+
+    connect(session, &Session::liveBitrateResult,
+            this, &StreamingPreferences::handleLiveBitrateResult,
+            Qt::UniqueConnection);
+    if (!session->requestLiveBitrate(bitrateKbps, &requestId)) {
+        liveBitrateState = LBS_FAILED;
+        appliedBitrateKbps = 0;
+        emit liveBitrateStatusChanged();
+        return false;
+    }
+
+    m_LiveBitrateRequestId = requestId;
+    liveBitrateState = LBS_PENDING;
+    appliedBitrateKbps = 0;
+    m_LiveBitrateTimeout.start();
+    emit liveBitrateStatusChanged();
+    return true;
+}
+
+void StreamingPreferences::handleLiveBitrateResult(quint32 requestId, int status,
+                                                    int appliedBitrate)
+{
+    if (liveBitrateState != LBS_PENDING || requestId != m_LiveBitrateRequestId) {
+        return;
+    }
+
+    m_LiveBitrateTimeout.stop();
+    m_LiveBitrateRequestId = 0;
+    appliedBitrateKbps = appliedBitrate;
+    switch (static_cast<DeckProtocol::BitrateStatus>(status)) {
+    case DeckProtocol::BitrateStatus::Applied:
+        liveBitrateState = LBS_APPLIED;
+        break;
+    case DeckProtocol::BitrateStatus::Clamped:
+        liveBitrateState = LBS_CLAMPED;
+        break;
+    case DeckProtocol::BitrateStatus::Unsupported:
+        liveBitrateState = LBS_UNSUPPORTED;
+        break;
+    case DeckProtocol::BitrateStatus::Failed:
+    default:
+        liveBitrateState = LBS_FAILED;
+        break;
+    }
+    emit liveBitrateStatusChanged();
 }
 
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool yuv444)
