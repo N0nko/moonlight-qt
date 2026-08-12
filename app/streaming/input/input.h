@@ -5,7 +5,12 @@
 
 #include "SDL_compat.h"
 
+#include <atomic>
+
+class SdlInputHandler;
+
 struct GamepadState {
+    SdlInputHandler* owner;
     SDL_GameController* controller;
     SDL_JoystickID jsId;
     short index;
@@ -132,6 +137,10 @@ public:
 
     int getAttachedGamepadMask();
 
+    void setInputForwardingEnabled(bool enabled);
+
+    bool isInputForwardingEnabled() const;
+
     void raiseAllKeys();
 
     void notifyMouseLeave();
@@ -209,6 +218,7 @@ private:
     bool m_SwapMouseButtons;
     bool m_ReverseScrollDirection;
     bool m_SwapFaceButtons;
+    std::atomic_bool m_InputForwardingEnabled;
 
     bool m_NeedsManualCaptureOnLeave;
     bool m_MouseWasInVideoRegion;

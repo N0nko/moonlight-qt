@@ -19,8 +19,13 @@
 // How far the finger can move before it can override the double tap deadzone
 #define DOUBLE_TAP_DEAD_ZONE_DELTA 0.025f
 
-Uint32 SdlInputHandler::longPressTimerCallback(Uint32, void*)
+Uint32 SdlInputHandler::longPressTimerCallback(Uint32, void* context)
 {
+    auto handler = static_cast<SdlInputHandler*>(context);
+    if (!handler->isInputForwardingEnabled()) {
+        return 0;
+    }
+
     // Raise the left click and start a right click
     LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
     LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_RIGHT);
@@ -61,6 +66,10 @@ void SdlInputHandler::disableTouchFeedback()
 
 void SdlInputHandler::handleAbsoluteFingerEvent(SDL_TouchFingerEvent* event)
 {
+    if (!isInputForwardingEnabled()) {
+        return;
+    }
+
     SDL_Rect src, dst;
     int windowWidth, windowHeight;
 
@@ -207,7 +216,7 @@ void SdlInputHandler::emulateAbsoluteFingerEvent(SDL_TouchFingerEvent* event)
         SDL_RemoveTimer(m_LongPressTimer);
         m_LongPressTimer = SDL_AddTimer(LONG_PRESS_ACTIVATION_DELAY,
                                         longPressTimerCallback,
-                                        nullptr);
+                                        this);
 
         // Left button down on finger down
         LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);

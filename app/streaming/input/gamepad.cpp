@@ -53,6 +53,10 @@ SdlInputHandler::findStateForGamepad(SDL_JoystickID id)
 
 void SdlInputHandler::sendGamepadState(GamepadState* state)
 {
+    if (!isInputForwardingEnabled()) {
+        return;
+    }
+
     SDL_assert(m_GamepadMask == 0x1 || m_MultiController);
 
     // Handle Select+PS as the clickpad button on PS4/5 controllers without a clickpad mapping
@@ -114,6 +118,10 @@ void SdlInputHandler::sendGamepadState(GamepadState* state)
 
 void SdlInputHandler::sendGamepadBatteryState(GamepadState* state, SDL_JoystickPowerLevel level)
 {
+    if (!isInputForwardingEnabled()) {
+        return;
+    }
+
     uint8_t batteryPercentage;
     uint8_t batteryState;
 
@@ -156,6 +164,11 @@ void SdlInputHandler::sendGamepadBatteryState(GamepadState* state, SDL_JoystickP
 Uint32 SdlInputHandler::mouseEmulationTimerCallback(Uint32 interval, void *param)
 {
     auto gamepad = reinterpret_cast<GamepadState*>(param);
+
+    if (gamepad->owner == nullptr ||
+            !gamepad->owner->isInputForwardingEnabled()) {
+        return 0;
+    }
 
     int rawX;
     int rawY;
@@ -289,7 +302,7 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
         if (event->button == SDL_CONTROLLER_BUTTON_START) {
             state->lastStartDownTime = SDL_GetTicks();
         }
-        else if (state->mouseEmulationTimer != 0) {
+        else if (isInputForwardingEnabled() && state->mouseEmulationTimer != 0) {
             if (event->button == SDL_CONTROLLER_BUTTON_A) {
                 LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
             }
@@ -332,7 +345,7 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
                                 "Mouse emulation deactivated");
                     Session::get()->notifyMouseEmulationMode(false);
                 }
-                else if (m_GamepadMouse) {
+                else if (m_GamepadMouse && isInputForwardingEnabled()) {
                     // Send the start button up event to the host, since we won't do it below
                     sendGamepadState(state);
 
@@ -344,7 +357,7 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
                 }
             }
         }
-        else if (state->mouseEmulationTimer != 0) {
+        else if (isInputForwardingEnabled() && state->mouseEmulationTimer != 0) {
             if (event->button == SDL_CONTROLLER_BUTTON_A) {
                 LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
             }
@@ -375,8 +388,10 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
         SDL_PushEvent(&event);
 
         // Clear buttons down on this gamepad
-        LiSendMultiControllerEvent(state->index, m_GamepadMask,
-                                   0, 0, 0, 0, 0, 0, 0);
+        if (isInputForwardingEnabled()) {
+            LiSendMultiControllerEvent(state->index, m_GamepadMask,
+                                       0, 0, 0, 0, 0, 0, 0);
+        }
         return;
     }
 
@@ -390,8 +405,10 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
                                                             !Session::get()->getOverlayManager().isOverlayEnabled(Overlay::OverlayDebug));
 
         // Clear buttons down on this gamepad
-        LiSendMultiControllerEvent(state->index, m_GamepadMask,
-                                   0, 0, 0, 0, 0, 0, 0);
+        if (isInputForwardingEnabled()) {
+            LiSendMultiControllerEvent(state->index, m_GamepadMask,
+                                       0, 0, 0, 0, 0, 0, 0);
+        }
         return;
     }
 
@@ -405,6 +422,10 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
 
 void SdlInputHandler::handleControllerSensorEvent(SDL_ControllerSensorEvent* event)
 {
+    if (!isInputForwardingEnabled()) {
+        return;
+    }
+
     GamepadState* state = findStateForGamepad(event->which);
     if (state == NULL) {
         return;
@@ -440,6 +461,10 @@ void SdlInputHandler::handleControllerSensorEvent(SDL_ControllerSensorEvent* eve
 
 void SdlInputHandler::handleControllerTouchpadEvent(SDL_ControllerTouchpadEvent* event)
 {
+    if (!isInputForwardingEnabled()) {
+        return;
+    }
+
     GamepadState* state = findStateForGamepad(event->which);
     if (state == NULL) {
         return;
@@ -549,6 +574,7 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
         }
 
         state = &m_GamepadState[i];
+        state->owner = this;
         if (m_MultiController) {
             state->index = i;
 
@@ -713,7 +739,9 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
 #endif
             type == LI_CTYPE_PS;
 
-        LiSendControllerArrivalEvent(state->index, m_GamepadMask, type, supportedButtonFlags, capabilities);
+        if (isInputForwardingEnabled()) {
+            LiSendControllerArrivalEvent(state->index, m_GamepadMask, type, supportedButtonFlags, capabilities);
+        }
 #else
 
         // Send an empty event to tell the PC we've arrived
@@ -755,11 +783,14 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
                         state->index);
 
             // Send a final event to let the PC know this gamepad is gone
-            LiSendMultiControllerEvent(state->index, m_GamepadMask,
-                                       0, 0, 0, 0, 0, 0, 0);
+            if (isInputForwardingEnabled()) {
+                LiSendMultiControllerEvent(state->index, m_GamepadMask,
+                                           0, 0, 0, 0, 0, 0, 0);
+            }
 
             // Clear all remaining state from this slot
             SDL_memset(state, 0, sizeof(*state));
+            state->owner = this;
         }
     }
 }

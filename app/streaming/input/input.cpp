@@ -15,6 +15,7 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
       m_SwapMouseButtons(prefs.swapMouseButtons),
       m_ReverseScrollDirection(prefs.reverseScrollDirection),
       m_SwapFaceButtons(prefs.swapFaceButtons),
+      m_InputForwardingEnabled(true),
       m_MouseWasInVideoRegion(false),
       m_PendingMouseButtonsAllUpOnVideoRegionLeave(false),
       m_PointerRegionLockActive(false),
@@ -211,6 +212,9 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     m_GamepadMask = getAttachedGamepadMask();
 
     SDL_zero(m_GamepadState);
+    for (auto& state : m_GamepadState) {
+        state.owner = this;
+    }
     SDL_zero(m_LastTouchDownEvent);
     SDL_zero(m_LastTouchUpEvent);
     SDL_zero(m_TouchDownEvent);
@@ -285,6 +289,53 @@ void SdlInputHandler::raiseAllKeys()
     }
 
     m_KeysDown.clear();
+}
+
+void SdlInputHandler::setInputForwardingEnabled(bool enabled)
+{
+    const bool wasEnabled = m_InputForwardingEnabled.exchange(
+                enabled, std::memory_order_relaxed);
+    if (!wasEnabled || enabled) {
+        return;
+    }
+
+    // Release keyboard state through the old generation, then prevent any
+    // pending touch or mouse-emulation timers from reaching common-c.
+    raiseAllKeys();
+
+    SDL_RemoveTimer(m_LongPressTimer);
+    SDL_RemoveTimer(m_LeftButtonReleaseTimer);
+    SDL_RemoveTimer(m_RightButtonReleaseTimer);
+    SDL_RemoveTimer(m_DragTimer);
+    m_LongPressTimer = 0;
+    m_LeftButtonReleaseTimer = 0;
+    m_RightButtonReleaseTimer = 0;
+    m_DragTimer = 0;
+    m_NumFingersDown = 0;
+    SDL_zero(m_LastTouchDownEvent);
+    SDL_zero(m_LastTouchUpEvent);
+    SDL_zero(m_TouchDownEvent);
+
+    for (auto& state : m_GamepadState) {
+        if (state.mouseEmulationTimer != 0) {
+            SDL_RemoveTimer(state.mouseEmulationTimer);
+            state.mouseEmulationTimer = 0;
+            if (Session::get() != nullptr) {
+                Session::get()->notifyMouseEmulationMode(false);
+            }
+        }
+
+        state.buttons = 0;
+        state.lsX = state.lsY = 0;
+        state.rsX = state.rsY = 0;
+        state.lt = state.rt = 0;
+        state.emulatedClickpadButtonDown = false;
+    }
+}
+
+bool SdlInputHandler::isInputForwardingEnabled() const
+{
+    return m_InputForwardingEnabled.load(std::memory_order_relaxed);
 }
 
 void SdlInputHandler::notifyMouseLeave()
