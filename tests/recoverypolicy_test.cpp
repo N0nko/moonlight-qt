@@ -120,10 +120,14 @@ void survivesTickWraparound()
 void suspendsWithoutRetrying()
 {
     RecoveryPolicy policy(kConfig);
+    CHECK(policy.begin(100, -7) == RecoveryPolicy::Action::StartConnection);
+    CHECK(policy.connectionFailed(200, -8) == RecoveryPolicy::Action::None);
     policy.suspend();
     CHECK(policy.state() == RecoveryPolicy::State::Suspended);
     CHECK(policy.tick(50000) == RecoveryPolicy::Action::None);
     CHECK(policy.begin(50000, -1) == RecoveryPolicy::Action::StartConnection);
+    CHECK(policy.attempts() == 1);
+    CHECK(policy.lastError() == -1);
 }
 
 void readsBoundedCompatibilitySettings()

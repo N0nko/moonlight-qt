@@ -1,6 +1,9 @@
 #include "streaming/session.h"
 
 #include "connectionstartthread.h"
+#ifdef HAVE_LOGIND_SLEEP
+#include "logindsleepmonitor.h"
+#endif
 
 #include "SDL_compat.h"
 
@@ -152,6 +155,72 @@ void Session::finishRecovery()
     m_InputHandler->updatePointerRegionLock();
 }
 
+#ifdef HAVE_LOGIND_SLEEP
+void Session::queueLifecycleSleepState(bool sleeping)
+{
+    if (!m_EventLoopRunning.load()) {
+        return;
+    }
+
+    std::atomic_bool& queued = sleeping ? m_LifecycleSleepQueued : m_LifecycleWakeQueued;
+    if (!queued.exchange(true)) {
+        SDL_Event event = {};
+        event.type = SDL_USEREVENT;
+        event.user.code = kSdlCodeLifecycleStateChanged;
+        if (SDL_PushEvent(&event) != 1) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Unable to wake SDL for lifecycle transition");
+        }
+    }
+}
+
+bool Session::processLifecycleSleepState()
+{
+    if (m_LifecycleSleepQueued.exchange(false)) {
+        if (!m_LifecycleSuspended.exchange(true)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Quiescing the stream before system sleep");
+
+            m_RecoveryMode.store(true);
+            m_RecoveryPolicy.suspend();
+
+            if (m_RecoveryThread != nullptr) {
+                LiInterruptConnection();
+                m_RecoveryThread->wait();
+                delete m_RecoveryThread;
+                m_RecoveryThread = nullptr;
+            }
+
+            stopConnectionForRecovery();
+            m_ConnectionLossQueued.store(false);
+            m_FramePresentedQueued.store(false);
+            m_AttemptTerminated.store(false);
+            m_LastConnectionError.store(0);
+        }
+
+        if (m_LogindSleepMonitor != nullptr) {
+            m_LogindSleepMonitor->acknowledgeSleepReady();
+        }
+    }
+
+    if (m_LifecycleWakeQueued.exchange(false)) {
+        if (m_LifecycleSuspended.exchange(false)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "System wake received; resuming in the existing stream window");
+
+            m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
+                                               "Reconnecting to PC...");
+            m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
+            if (!applyRecoveryAction(m_RecoveryPolicy.begin(SDL_GetTicks(), 0))) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+#endif
+
 bool Session::applyRecoveryAction(RecoveryPolicy::Action action)
 {
     switch (action) {
@@ -205,6 +274,16 @@ bool Session::applyRecoveryAction(RecoveryPolicy::Action action)
 
 bool Session::processRecoveryEvents()
 {
+#ifdef HAVE_LOGIND_SLEEP
+    if (!processLifecycleSleepState()) {
+        return false;
+    }
+
+    if (m_LifecycleSuspended.load()) {
+        return true;
+    }
+#endif
+
     if (m_ConnectionLossQueued.exchange(false)) {
         const int errorCode = m_LastConnectionError.load();
         if (!shouldRecoverConnection(errorCode)) {
