@@ -19,6 +19,8 @@
 #define SER_BITRATE "bitrate"
 #define SER_UNLOCK_BITRATE "unlockbitrate"
 #define SER_AUTOADJUSTBITRATE "autoadjustbitrate"
+#define SER_APPLYREMOTEONCONNECT "applyremoteonconnect"
+#define SER_RESTOREDESKONDISCONNECT "restoredeskondisconnect"
 #define SER_FULLSCREEN "fullscreen"
 #define SER_VSYNC "vsync"
 #define SER_GAMEOPTS "gameopts"
@@ -63,7 +65,8 @@ Q_GLOBAL_STATIC(QReadWriteLock, s_GlobalPrefsLock)
 
 StreamingPreferences::StreamingPreferences(QQmlEngine *qmlEngine)
     : m_QmlEngine(qmlEngine),
-      m_LiveBitrateRequestId(0)
+      m_LiveBitrateRequestId(0),
+      m_RemoteDisplayRequestId(0)
 {
     liveBitrateState = LBS_IDLE;
     appliedBitrateKbps = 0;
@@ -75,6 +78,17 @@ StreamingPreferences::StreamingPreferences(QQmlEngine *qmlEngine)
             appliedBitrateKbps = 0;
             m_LiveBitrateRequestId = 0;
             emit liveBitrateStatusChanged();
+        }
+    });
+    remoteDisplayState = RDS_IDLE;
+    remoteDisplayProfile = RDP_NONE;
+    m_RemoteDisplayTimeout.setSingleShot(true);
+    m_RemoteDisplayTimeout.setInterval(16000);
+    connect(&m_RemoteDisplayTimeout, &QTimer::timeout, this, [this]() {
+        if (remoteDisplayState == RDS_PENDING) {
+            remoteDisplayState = RDS_UNAVAILABLE;
+            m_RemoteDisplayRequestId = 0;
+            emit remoteDisplayStatusChanged();
         }
     });
     reload();
@@ -144,6 +158,8 @@ void StreamingPreferences::reload()
     bitrateKbps = settings.value(SER_BITRATE, 300000).toInt();
     unlockBitrate = settings.value(SER_UNLOCK_BITRATE, true).toBool();
     autoAdjustBitrate = settings.value(SER_AUTOADJUSTBITRATE, false).toBool();
+    applyRemoteOnConnect = settings.value(SER_APPLYREMOTEONCONNECT, true).toBool();
+    restoreDeskOnDisconnect = settings.value(SER_RESTOREDESKONDISCONNECT, false).toBool();
     enableVsync = settings.value(SER_VSYNC, true).toBool();
     gameOptimizations = settings.value(SER_GAMEOPTS, true).toBool();
     playAudioOnHost = settings.value(SER_HOSTAUDIO, false).toBool();
@@ -343,6 +359,8 @@ void StreamingPreferences::save()
     settings.setValue(SER_BITRATE, bitrateKbps);
     settings.setValue(SER_UNLOCK_BITRATE, unlockBitrate);
     settings.setValue(SER_AUTOADJUSTBITRATE, autoAdjustBitrate);
+    settings.setValue(SER_APPLYREMOTEONCONNECT, applyRemoteOnConnect);
+    settings.setValue(SER_RESTOREDESKONDISCONNECT, restoreDeskOnDisconnect);
     settings.setValue(SER_VSYNC, enableVsync);
     settings.setValue(SER_GAMEOPTS, gameOptimizations);
     settings.setValue(SER_HOSTAUDIO, playAudioOnHost);
@@ -411,6 +429,47 @@ bool StreamingPreferences::applyLiveBitrate()
     return true;
 }
 
+bool StreamingPreferences::applyRemoteDisplayProfile(int profile)
+{
+    if (profile < RDP_DESK || profile > RDP_TV) {
+        return false;
+    }
+
+    m_RemoteDisplayTimeout.stop();
+    m_RemoteDisplayRequestId = 0;
+    remoteDisplayProfile = static_cast<RemoteDisplayProfile>(profile);
+
+    Session* session = Session::get();
+    quint32 requestId = 0;
+    if (session == nullptr) {
+        remoteDisplayState = RDS_UNAVAILABLE;
+        emit remoteDisplayStatusChanged();
+        return false;
+    }
+
+    connect(session, &Session::remoteDisplayResult,
+            this, &StreamingPreferences::handleRemoteDisplayResult,
+            Qt::UniqueConnection);
+    if (!session->requestRemoteDisplayProfile(profile, &requestId)) {
+        remoteDisplayState = RDS_UNAVAILABLE;
+        emit remoteDisplayStatusChanged();
+        return false;
+    }
+
+    m_RemoteDisplayRequestId = requestId;
+    remoteDisplayState = RDS_PENDING;
+    m_RemoteDisplayTimeout.start();
+    emit remoteDisplayStatusChanged();
+    return true;
+}
+
+bool StreamingPreferences::applyRemoteDisplayPolicy()
+{
+    save();
+    Session* session = Session::get();
+    return session == nullptr || session->applyRemoteDisplayPolicy();
+}
+
 void StreamingPreferences::handleLiveBitrateResult(quint32 requestId, int status,
                                                     int appliedBitrate)
 {
@@ -437,6 +496,34 @@ void StreamingPreferences::handleLiveBitrateResult(quint32 requestId, int status
         break;
     }
     emit liveBitrateStatusChanged();
+}
+
+void StreamingPreferences::handleRemoteDisplayResult(quint32 requestId,
+                                                      int status,
+                                                      int profile)
+{
+    if (remoteDisplayState != RDS_PENDING ||
+            requestId != m_RemoteDisplayRequestId ||
+            profile < RDP_DESK || profile > RDP_TV) {
+        return;
+    }
+
+    m_RemoteDisplayTimeout.stop();
+    m_RemoteDisplayRequestId = 0;
+    remoteDisplayProfile = static_cast<RemoteDisplayProfile>(profile);
+    switch (static_cast<DeckProtocol::DisplayStatus>(status)) {
+    case DeckProtocol::DisplayStatus::Applied:
+        remoteDisplayState = RDS_APPLIED;
+        break;
+    case DeckProtocol::DisplayStatus::Unavailable:
+        remoteDisplayState = RDS_UNAVAILABLE;
+        break;
+    case DeckProtocol::DisplayStatus::Failed:
+    default:
+        remoteDisplayState = RDS_FAILED;
+        break;
+    }
+    emit remoteDisplayStatusChanged();
 }
 
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool yuv444)

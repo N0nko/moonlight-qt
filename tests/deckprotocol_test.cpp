@@ -31,5 +31,29 @@ int main()
 
     response[1] = 1;
     CHECK(!DeckProtocol::parseBitrateResult(response.data(), response.size(), &result));
+
+    const auto displayRequest = DeckProtocol::makeDisplayApply(
+                DeckProtocol::DisplayProfile::Remote);
+    CHECK(displayRequest[0] == static_cast<std::uint8_t>(
+              DeckProtocol::DisplayProfile::Remote));
+
+    const auto displayPolicy = DeckProtocol::makeDisplayPolicy(true, false);
+    CHECK(displayPolicy[0] == 0x01);
+
+    std::array<std::uint8_t, 4> displayResponse {};
+    displayResponse[0] = static_cast<std::uint8_t>(
+                DeckProtocol::DisplayStatus::Applied);
+    displayResponse[1] = static_cast<std::uint8_t>(
+                DeckProtocol::DisplayProfile::Tv);
+    DeckProtocol::DisplayResult displayResult {};
+    CHECK(DeckProtocol::parseDisplayResult(displayResponse.data(),
+                                           displayResponse.size(),
+                                           &displayResult));
+    CHECK(displayResult.status == DeckProtocol::DisplayStatus::Applied);
+    CHECK(displayResult.profile == DeckProtocol::DisplayProfile::Tv);
+    displayResponse[1] = 4;
+    CHECK(!DeckProtocol::parseDisplayResult(displayResponse.data(),
+                                            displayResponse.size(),
+                                            &displayResult));
     return EXIT_SUCCESS;
 }

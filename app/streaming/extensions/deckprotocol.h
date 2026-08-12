@@ -10,12 +10,34 @@ constexpr std::uint8_t LiveBitrateSet = 1;
 constexpr std::uint8_t LiveBitrateResult = 2;
 constexpr std::uint32_t MinimumBitrateKbps = 500;
 constexpr std::uint32_t MaximumBitrateKbps = 500000;
+constexpr std::uint8_t RemoteDisplayFeature = 3;
+constexpr std::uint8_t RemoteDisplayApply = 1;
+constexpr std::uint8_t RemoteDisplayResult = 2;
+constexpr std::uint8_t RemoteDisplayPolicy = 3;
+constexpr std::uint8_t RemoteDisplayIntentionalDisconnect = 4;
 
 enum class BitrateStatus : std::uint8_t {
     Applied = 2,
     Clamped = 3,
     Failed = 4,
     Unsupported = 5,
+};
+
+enum class DisplayProfile : std::uint8_t {
+    Desk = 1,
+    Remote = 2,
+    Tv = 3,
+};
+
+enum class DisplayStatus : std::uint8_t {
+    Applied = 2,
+    Unavailable = 3,
+    Failed = 4,
+};
+
+struct DisplayResult {
+    DisplayStatus status;
+    DisplayProfile profile;
 };
 
 struct BitrateResult {
@@ -77,6 +99,46 @@ inline bool parseBitrateResult(const std::uint8_t* payload,
 
     result->status = status;
     result->appliedBitrateKbps = appliedBitrate;
+    return true;
+}
+
+inline std::array<std::uint8_t, 4> makeDisplayApply(DisplayProfile profile)
+{
+    std::array<std::uint8_t, 4> payload {};
+    payload[0] = static_cast<std::uint8_t>(profile);
+    return payload;
+}
+
+inline std::array<std::uint8_t, 4> makeDisplayPolicy(bool applyRemoteOnConnect,
+                                                     bool restoreDeskOnDisconnect)
+{
+    std::array<std::uint8_t, 4> payload {};
+    payload[0] = static_cast<std::uint8_t>(
+                (applyRemoteOnConnect ? 0x01 : 0) |
+                (restoreDeskOnDisconnect ? 0x02 : 0));
+    return payload;
+}
+
+inline bool parseDisplayResult(const std::uint8_t* payload,
+                               std::size_t payloadLength,
+                               DisplayResult* result)
+{
+    if (payload == nullptr || result == nullptr || payloadLength != 4 ||
+            payload[2] != 0 || payload[3] != 0) {
+        return false;
+    }
+
+    const auto status = static_cast<DisplayStatus>(payload[0]);
+    const auto profile = static_cast<DisplayProfile>(payload[1]);
+    if ((status != DisplayStatus::Applied &&
+         status != DisplayStatus::Unavailable &&
+         status != DisplayStatus::Failed) ||
+            profile < DisplayProfile::Desk || profile > DisplayProfile::Tv) {
+        return false;
+    }
+
+    result->status = status;
+    result->profile = profile;
     return true;
 }
 } // namespace DeckProtocol
