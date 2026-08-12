@@ -2314,6 +2314,10 @@ void Session::exec()
     m_RecoveryPolicy.markStreaming();
     m_EventLoopRunning.store(true);
 
+    if (m_Preferences->deckMicrophone && m_DeckMicrophone.start()) {
+        m_DeckMicrophone.setConnected(true);
+    }
+
 #ifdef HAVE_LINUX_LIFECYCLE
     m_LinuxLifecycleMonitor = new LinuxLifecycleMonitor(
                 [this](bool sleeping) {
@@ -2711,6 +2715,7 @@ void Session::exec()
     }
 
 DispatchDeferredCleanup:
+    m_DeckMicrophone.stop();
     if (!m_UnexpectedTermination && !m_RecoveryMode.load()) {
         markIntentionalDisconnect();
     }

@@ -6,6 +6,7 @@
 
 #include <Limelight.h>
 #include <opus_multistream.h>
+#include "deckmicrophone.h"
 #include "settings/streamingpreferences.h"
 #include "input/input.h"
 #include "video/decoder.h"
@@ -146,6 +147,8 @@ public:
     bool requestRemoteDisplayProfile(int profile, quint32* requestId);
 
     bool applyRemoteDisplayPolicy();
+
+    bool setDeckMicrophoneEnabled(bool enabled);
 
     void setShouldExit(bool quitHostApp = false);
 
@@ -391,6 +394,8 @@ private:
     OPUS_MULTISTREAM_CONFIGURATION m_OriginalAudioConfig;
     int m_AudioSampleCount;
     Uint32 m_DropAudioEndTime;
+
+    DeckMicrophone m_DeckMicrophone;
 
     Overlay::OverlayManager m_OverlayManager;
 

@@ -1094,6 +1094,22 @@ Flickable {
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Mutes Moonlight's audio when you Alt+Tab out of the stream or click on a different window.")
                 }
+
+                CheckBox {
+                    width: parent.width
+                    text: qsTr("Use Steam Deck microphone")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.deckMicrophone
+                    onClicked: {
+                        StreamingPreferences.deckMicrophone = checked
+                        StreamingPreferences.applyDeckMicrophone()
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Forwards the Deck microphone inside the encrypted stream to CABLE Input on the host.")
+                }
             }
         }
 

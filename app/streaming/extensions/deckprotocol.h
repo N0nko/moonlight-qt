@@ -10,6 +10,14 @@ constexpr std::uint8_t LiveBitrateSet = 1;
 constexpr std::uint8_t LiveBitrateResult = 2;
 constexpr std::uint32_t MinimumBitrateKbps = 500;
 constexpr std::uint32_t MaximumBitrateKbps = 500000;
+constexpr std::uint8_t DeckMicrophoneFeature = 2;
+constexpr std::uint8_t DeckMicrophoneConfigure = 1;
+constexpr std::uint8_t DeckMicrophoneStatus = 2;
+constexpr std::uint8_t DeckMicrophoneOpus = 3;
+constexpr std::uint8_t DeckMicrophoneOpusCodec = 1;
+constexpr std::uint8_t DeckMicrophoneChannels = 1;
+constexpr std::uint32_t DeckMicrophoneSampleRate = 48000;
+constexpr std::uint16_t DeckMicrophoneFrameSamples = 960;
 constexpr std::uint8_t RemoteDisplayFeature = 3;
 constexpr std::uint8_t RemoteDisplayApply = 1;
 constexpr std::uint8_t RemoteDisplayResult = 2;
@@ -40,6 +48,13 @@ struct DisplayResult {
     DisplayProfile profile;
 };
 
+enum class MicrophoneStatus : std::uint8_t {
+    Active = 2,
+    Unsupported = 3,
+    Failed = 4,
+    Disabled = 5,
+};
+
 struct BitrateResult {
     BitrateStatus status;
     std::uint32_t appliedBitrateKbps;
@@ -51,6 +66,18 @@ constexpr std::uint32_t readLe32(const std::uint8_t* data)
            static_cast<std::uint32_t>(data[1]) << 8 |
            static_cast<std::uint32_t>(data[2]) << 16 |
            static_cast<std::uint32_t>(data[3]) << 24;
+}
+
+constexpr std::uint16_t readLe16(const std::uint8_t* data)
+{
+    return static_cast<std::uint16_t>(data[0]) |
+           static_cast<std::uint16_t>(data[1]) << 8;
+}
+
+constexpr void writeLe16(std::uint8_t* data, std::uint16_t value)
+{
+    data[0] = static_cast<std::uint8_t>(value);
+    data[1] = static_cast<std::uint8_t>(value >> 8);
 }
 
 constexpr void writeLe32(std::uint8_t* data, std::uint32_t value)
@@ -140,5 +167,37 @@ inline bool parseDisplayResult(const std::uint8_t* payload,
     result->status = status;
     result->profile = profile;
     return true;
+}
+
+inline std::array<std::uint8_t, 8> makeMicrophoneConfiguration(bool enabled)
+{
+    std::array<std::uint8_t, 8> payload {};
+    payload[0] = enabled ? 1 : 0;
+    payload[1] = DeckMicrophoneOpusCodec;
+    payload[2] = DeckMicrophoneChannels;
+    writeLe32(payload.data() + 4, DeckMicrophoneSampleRate);
+    return payload;
+}
+
+inline bool parseMicrophoneStatus(const std::uint8_t* payload,
+                                  std::size_t payloadLength,
+                                  MicrophoneStatus* status)
+{
+    if (payload == nullptr || status == nullptr || payloadLength != 4 ||
+            payload[1] != 0 || payload[2] != 0 || payload[3] != 0) {
+        return false;
+    }
+
+    const auto parsedStatus = static_cast<MicrophoneStatus>(payload[0]);
+    switch (parsedStatus) {
+    case MicrophoneStatus::Active:
+    case MicrophoneStatus::Unsupported:
+    case MicrophoneStatus::Failed:
+    case MicrophoneStatus::Disabled:
+        *status = parsedStatus;
+        return true;
+    }
+
+    return false;
 }
 } // namespace DeckProtocol

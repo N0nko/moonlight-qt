@@ -142,6 +142,27 @@ void Session::markIntentionalDisconnect()
                            LI_EXTENSION_MESSAGE_RELIABLE);
 }
 
+bool Session::setDeckMicrophoneEnabled(bool enabled)
+{
+    if (!enabled) {
+        m_DeckMicrophone.stop();
+        return true;
+    }
+
+    if (!m_EventLoopRunning.load()) {
+        return false;
+    }
+    if (m_RecoveryMode.load()) {
+        return true;
+    }
+
+    if (!m_DeckMicrophone.start()) {
+        return false;
+    }
+    m_DeckMicrophone.setConnected(true);
+    return true;
+}
+
 void Session::processExtensionMessages()
 {
     if (!m_ExtensionMessageQueued.load()) {
@@ -170,6 +191,21 @@ void Session::processExtensionMessages()
             emit remoteDisplayResult(message.requestId,
                                      static_cast<int>(result.status),
                                      static_cast<int>(result.profile));
+            continue;
+        }
+
+        if (message.feature == DeckProtocol::DeckMicrophoneFeature &&
+                message.opcode == DeckProtocol::DeckMicrophoneStatus &&
+                message.requestId != 0) {
+            DeckProtocol::MicrophoneStatus status {};
+            if (!DeckProtocol::parseMicrophoneStatus(message.payload.data(),
+                                                      message.payload.size(),
+                                                      &status)) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO,
+                            "Discarding malformed Deck microphone status");
+                continue;
+            }
+            m_DeckMicrophone.handleStatus(message.requestId, status);
             continue;
         }
 

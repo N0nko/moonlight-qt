@@ -203,6 +203,7 @@ SOURCES += \
     streaming/lifecycle/recoverysettings.cpp \
     streaming/lifecycle/sessionrecovery.cpp \
     streaming/extensions/deckextensions.cpp \
+    streaming/deckmicrophone.cpp \
     streaming/session.cpp \
     streaming/audio/audio.cpp \
     streaming/audio/renderers/sdlaud.cpp \
@@ -244,6 +245,8 @@ HEADERS += \
     streaming/lifecycle/recoverypolicy.h \
     streaming/lifecycle/recoverysettings.h \
     streaming/extensions/deckprotocol.h \
+    streaming/deckmicrophone.h \
+    streaming/audio/sdlaudiosubsystem.h \
     streaming/session.h \
     streaming/audio/renderers/renderer.h \
     streaming/audio/renderers/sdl.h \
