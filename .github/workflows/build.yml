@@ -33,12 +33,14 @@ jobs:
       ci_version: ${{ needs.setup.outputs.ci_version }}
 
   build-steamlink:
+    if: github.ref != 'refs/heads/deck/rebuild'
     needs: setup
     uses: ./.github/workflows/build-steamlink.yml
     with:
       ci_version: ${{ needs.setup.outputs.ci_version }}
 
   build-windows-macos:
+    if: github.ref != 'refs/heads/deck/rebuild'
     needs: setup
     uses: ./.github/workflows/build-win-mac.yml
     with:

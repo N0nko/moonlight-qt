@@ -173,3 +173,4 @@ jobs:
           path: build/installer-release/Moonlight-${{ env.CI_VERSION }}-x86_64.AppImage
           compression-level: 0
           if-no-files-found: error
+          retention-days: 1
