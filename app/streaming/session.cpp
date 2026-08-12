@@ -583,6 +583,8 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_InputHandler(nullptr),
       m_MouseEmulationRefCount(0),
       m_FlushingWindowEventsRef(0),
+      m_CurrentDisplayIndex(-1),
+      m_NeedsPostDecoderCreationCapture(false),
       m_ShouldExit(false),
       m_AsyncConnectionSuccess(false),
       m_PortTestResults(0),
@@ -1738,6 +1740,69 @@ void Session::flushWindowEvents()
     SDL_PushEvent(&flushEvent);
 }
 
+void Session::destroyVideoDecoder()
+{
+    SDL_LockMutex(m_DecoderLock);
+    delete m_VideoDecoder;
+    m_VideoDecoder = nullptr;
+    SDL_UnlockMutex(m_DecoderLock);
+}
+
+bool Session::recreateVideoDecoder(bool flushEvents,
+                                   DecoderFramePresentedCallback framePresentedCallback,
+                                   void* framePresentedContext)
+{
+    SDL_LockMutex(m_DecoderLock);
+    delete m_VideoDecoder;
+    m_VideoDecoder = nullptr;
+
+    if (flushEvents) {
+        // Discard renderer reset events queued by the decoder being replaced.
+        flushWindowEvents();
+        SDL_PumpEvents();
+        SDL_FlushEvent(SDL_RENDER_DEVICE_RESET);
+    }
+
+    const int displayIndex = SDL_GetWindowDisplayIndex(m_Window);
+    if (displayIndex != m_CurrentDisplayIndex) {
+        m_CurrentDisplayIndex = displayIndex;
+        updateOptimalWindowDisplayMode();
+    }
+
+    int displayHz = StreamUtils::getDisplayRefreshRate(m_Window);
+    bool enableVsync = m_Preferences->enableVsync;
+    if (displayHz + 5 < m_StreamConfig.fps) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Disabling V-sync because refresh rate limit exceeded");
+        enableVsync = false;
+    }
+
+    if (!chooseDecoder(m_Preferences->videoDecoderSelection,
+                       m_Preferences->rendererSelection,
+                       m_Window, m_ActiveVideoFormat, m_ActiveVideoWidth,
+                       m_ActiveVideoHeight, m_ActiveVideoFrameRate,
+                       enableVsync,
+                       enableVsync && m_Preferences->framePacing,
+                       false,
+                       m_VideoDecoder,
+                       framePresentedCallback,
+                       framePresentedContext)) {
+        SDL_UnlockMutex(m_DecoderLock);
+        return false;
+    }
+
+    if (m_NeedsPostDecoderCreationCapture) {
+        m_InputHandler->setCaptureActive(true);
+        m_NeedsPostDecoderCreationCapture = false;
+    }
+
+    LiRequestIdrFrame();
+    m_VideoDecoder->setHdrMode(LiGetCurrentHostDisplayHdrMode());
+    m_InputHandler->updatePointerRegionLock();
+    SDL_UnlockMutex(m_DecoderLock);
+    return true;
+}
+
 void Session::setShouldExit(bool quitHostApp)
 {
     // If the caller has explicitly asked us to quit the host app,
@@ -1914,7 +1979,7 @@ void Session::exec()
     }
 
     bool needsFirstEnterCapture = false;
-    bool needsPostDecoderCreationCapture = false;
+    m_NeedsPostDecoderCreationCapture = false;
 
     // Avoid capturing the mouse initially for windowed relative mode.
     // We still capture in windowed absolute mode because it doesn't
@@ -1931,7 +1996,7 @@ void Session::exec()
         }
         else {
             // X11/XWayland: Capture after decoder creation
-            needsPostDecoderCreationCapture = true;
+            m_NeedsPostDecoderCreationCapture = true;
         }
     }
 
@@ -1949,7 +2014,7 @@ void Session::exec()
     // sleep precision and more accurate callback timing.
     SDL_SetHint(SDL_HINT_TIMER_RESOLUTION, "1");
 
-    int currentDisplayIndex = SDL_GetWindowDisplayIndex(m_Window);
+    m_CurrentDisplayIndex = SDL_GetWindowDisplayIndex(m_Window);
 
     // Now that we're about to stream, any SDL_QUIT event is expected
     // unless it comes from the connection termination callback where
@@ -2089,7 +2154,7 @@ void Session::exec()
                 }
 #else
                 // Prior to SDL 2.0.18, we must check the display index for each window event
-                if (SDL_GetWindowDisplayIndex(m_Window) == currentDisplayIndex) {
+                if (SDL_GetWindowDisplayIndex(m_Window) == m_CurrentDisplayIndex) {
                     break;
                 }
 #endif
@@ -2129,7 +2194,7 @@ void Session::exec()
                 }
 
                 int newDisplayIndex = SDL_GetWindowDisplayIndex(m_Window);
-                if (newDisplayIndex != currentDisplayIndex) {
+                if (newDisplayIndex != m_CurrentDisplayIndex) {
                     windowChangeInfo.stateChangeFlags |= WINDOW_STATE_CHANGE_DISPLAY;
 
                     windowChangeInfo.displayIndex = newDisplayIndex;
@@ -2139,7 +2204,7 @@ void Session::exec()
                     // and that we apply any V-Sync disablement rules that may be needed for
                     // this display.
                     SDL_DisplayMode oldMode, newMode;
-                    if (SDL_GetCurrentDisplayMode(currentDisplayIndex, &oldMode) < 0 ||
+                    if (SDL_GetCurrentDisplayMode(m_CurrentDisplayIndex, &oldMode) < 0 ||
                             SDL_GetCurrentDisplayMode(newDisplayIndex, &newMode) < 0 ||
                             oldMode.refresh_rate != newMode.refresh_rate) {
                         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -2151,8 +2216,8 @@ void Session::exec()
                 if (!forceRecreation && m_VideoDecoder->notifyWindowChanged(&windowChangeInfo)) {
                     // Update the window display mode based on our current monitor
                     // NB: Avoid a useless modeset by only doing this if it changed.
-                    if (newDisplayIndex != currentDisplayIndex) {
-                        currentDisplayIndex = newDisplayIndex;
+                    if (newDisplayIndex != m_CurrentDisplayIndex) {
+                        m_CurrentDisplayIndex = newDisplayIndex;
                         updateOptimalWindowDisplayMode();
                     }
 
@@ -2175,79 +2240,12 @@ void Session::exec()
                             event.type);
             }
 
-            SDL_LockMutex(m_DecoderLock);
-
-            // Destroy the old decoder
-            delete m_VideoDecoder;
-
-            // Insert a barrier to discard any additional window events
-            // that could cause the renderer to be and recreated again.
-            // We don't use SDL_FlushEvent() here because it could cause
-            // important events to be lost.
-            flushWindowEvents();
-
-            // Update the window display mode based on our current monitor
-            // NB: Avoid a useless modeset by only doing this if it changed.
-            if (currentDisplayIndex != SDL_GetWindowDisplayIndex(m_Window)) {
-                currentDisplayIndex = SDL_GetWindowDisplayIndex(m_Window);
-                updateOptimalWindowDisplayMode();
+            if (!recreateVideoDecoder(true)) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "Failed to recreate decoder after reset");
+                emit displayLaunchError(tr("Unable to initialize video decoder. Please check your streaming settings and try again."));
+                goto DispatchDeferredCleanup;
             }
-
-            // Now that the old decoder is dead, flush any events it may
-            // have queued to reset itself (if this reset was the result
-            // of device loss or an internal error).
-            SDL_PumpEvents();
-            SDL_FlushEvent(SDL_RENDER_DEVICE_RESET);
-
-            {
-                // If the stream exceeds the display refresh rate (plus some slack),
-                // forcefully disable V-sync to allow the stream to render faster
-                // than the display.
-                int displayHz = StreamUtils::getDisplayRefreshRate(m_Window);
-                bool enableVsync = m_Preferences->enableVsync;
-                if (displayHz + 5 < m_StreamConfig.fps) {
-                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                "Disabling V-sync because refresh rate limit exceeded");
-                    enableVsync = false;
-                }
-
-                // Choose a new decoder (hopefully the same one, but possibly
-                // not if a GPU was removed or something).
-                if (!chooseDecoder(m_Preferences->videoDecoderSelection,
-                                   m_Preferences->rendererSelection,
-                                   m_Window, m_ActiveVideoFormat, m_ActiveVideoWidth,
-                                   m_ActiveVideoHeight, m_ActiveVideoFrameRate,
-                                   enableVsync,
-                                   enableVsync && m_Preferences->framePacing,
-                                   false,
-                                   s_ActiveSession->m_VideoDecoder)) {
-                    SDL_UnlockMutex(m_DecoderLock);
-                    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                                 "Failed to recreate decoder after reset");
-                    emit displayLaunchError(tr("Unable to initialize video decoder. Please check your streaming settings and try again."));
-                    goto DispatchDeferredCleanup;
-                }
-
-                // As of SDL 2.0.12, SDL_RecreateWindow() doesn't carry over mouse capture
-                // or mouse hiding state to the new window. By capturing after the decoder
-                // is set up, this ensures the window re-creation is already done.
-                if (needsPostDecoderCreationCapture) {
-                    m_InputHandler->setCaptureActive(true);
-                    needsPostDecoderCreationCapture = false;
-                }
-            }
-
-            // Request an IDR frame to complete the reset
-            LiRequestIdrFrame();
-
-            // Set HDR mode. We may miss the callback if we're in the middle
-            // of recreating our decoder at the time the HDR transition happens.
-            m_VideoDecoder->setHdrMode(LiGetCurrentHostDisplayHdrMode());
-
-            // After a window resize, we need to reset the pointer lock region
-            m_InputHandler->updatePointerRegionLock();
-
-            SDL_UnlockMutex(m_DecoderLock);
             break;
 
         case SDL_KEYUP:
@@ -2337,10 +2335,7 @@ DispatchDeferredCleanup:
     // Destroy the decoder, since this must be done on the main thread
     // NB: This must happen before LiStopConnection() for pull-based
     // decoders.
-    SDL_LockMutex(m_DecoderLock);
-    delete m_VideoDecoder;
-    m_VideoDecoder = nullptr;
-    SDL_UnlockMutex(m_DecoderLock);
+    destroyVideoDecoder();
 
     // Propagate state changes from the SDL window back to the Qt window
     //

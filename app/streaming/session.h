@@ -171,6 +171,12 @@ private:
 
     void updateOptimalWindowDisplayMode();
 
+    void destroyVideoDecoder();
+
+    bool recreateVideoDecoder(bool flushEvents,
+                              DecoderFramePresentedCallback framePresentedCallback = nullptr,
+                              void* framePresentedContext = nullptr);
+
     enum class DecoderAvailability {
         None,
         Software,
@@ -264,6 +270,8 @@ private:
     SdlInputHandler* m_InputHandler;
     int m_MouseEmulationRefCount;
     int m_FlushingWindowEventsRef;
+    int m_CurrentDisplayIndex;
+    bool m_NeedsPostDecoderCreationCapture;
     QStringList m_LaunchWarnings;
     bool m_ShouldExit;
 
