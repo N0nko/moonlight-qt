@@ -3,6 +3,9 @@
 #include "streaming/streamutils.h"
 #include "backend/richpresencemanager.h"
 #include "lifecycle/connectionstartthread.h"
+#ifdef HAVE_LOGIND_SLEEP
+#include "lifecycle/logindsleepmonitor.h"
+#endif
 
 #include <Limelight.h>
 #include "SDL_compat.h"
@@ -603,6 +606,12 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_RecoverySettings(RecoverySettings::fromEnvironment()),
       m_RecoveryPolicy(m_RecoverySettings.policyConfig()),
       m_RecoveryThread(nullptr),
+#ifdef HAVE_LOGIND_SLEEP
+      m_LogindSleepMonitor(nullptr),
+      m_LifecycleSleepQueued(false),
+      m_LifecycleWakeQueued(false),
+      m_LifecycleSuspended(false),
+#endif
       m_EventLoopRunning(false),
       m_RecoveryMode(false),
       m_ConnectionLossQueued(false),
@@ -2082,6 +2091,13 @@ void Session::exec()
     m_RecoveryPolicy.markStreaming();
     m_EventLoopRunning.store(true);
 
+#ifdef HAVE_LOGIND_SLEEP
+    m_LogindSleepMonitor = new LogindSleepMonitor([this](bool sleeping) {
+        queueLifecycleSleepState(sleeping);
+    });
+    m_LogindSleepMonitor->start();
+#endif
+
     // Hijack this thread to be the SDL main thread. We have to do this
     // because we want to suspend all Qt processing until the stream is over.
     SDL_Event event;
@@ -2100,7 +2116,13 @@ void Session::exec()
         // NB: This behavior was introduced in SDL 2.0.16, but had a few critical
         // issues that could cause indefinite timeouts, delayed joystick detection,
         // and other problems.
-        if (!SDL_WaitEventTimeout(&event, m_RecoveryMode.load() ? 25 : 1000)) {
+        int eventTimeout = m_RecoveryMode.load() ? 25 : 1000;
+#ifdef HAVE_LOGIND_SLEEP
+        if (m_LifecycleSuspended.load()) {
+            eventTimeout = 1000;
+        }
+#endif
+        if (!SDL_WaitEventTimeout(&event, eventTimeout)) {
             presence.runCallbacks();
             continue;
         }
@@ -2164,6 +2186,9 @@ void Session::exec()
                 break;
             case SDL_CODE_CONNECTION_STATE_CHANGED:
             case SDL_CODE_FRAME_PRESENTED:
+#ifdef HAVE_LOGIND_SLEEP
+            case kSdlCodeLifecycleStateChanged:
+#endif
                 // These events only wake the SDL thread. State is consumed at
                 // the top of the loop through atomic generation barriers.
                 break;
@@ -2373,6 +2398,13 @@ void Session::exec()
 
 DispatchDeferredCleanup:
     m_EventLoopRunning.store(false);
+#ifdef HAVE_LOGIND_SLEEP
+    if (m_LogindSleepMonitor != nullptr) {
+        m_LogindSleepMonitor->stopMonitoring();
+        delete m_LogindSleepMonitor;
+        m_LogindSleepMonitor = nullptr;
+    }
+#endif
     m_RecoveryPolicy.stop();
 
     if (m_RecoveryThread != nullptr) {

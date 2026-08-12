@@ -10,6 +10,13 @@ unix:!macx {
 
 include(../globaldefs.pri)
 
+linux:!config_SL {
+    QT += dbus
+    DEFINES += HAVE_LOGIND_SLEEP
+    SOURCES += streaming/lifecycle/logindsleepmonitor.cpp
+    HEADERS += streaming/lifecycle/logindsleepmonitor.h
+}
+
 # Precompile QML files to avoid writing qmlcache on portable versions.
 # Since this binds the app against the Qt runtime version, we will only
 # do this for Windows and Mac (when disable-prebuilts is not defined),

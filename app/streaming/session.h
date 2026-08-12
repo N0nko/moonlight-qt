@@ -16,6 +16,10 @@
 #include <atomic>
 
 class QThread;
+#ifdef HAVE_LOGIND_SLEEP
+class LogindSleepMonitor;
+constexpr int kSdlCodeLifecycleStateChanged = 108;
+#endif
 
 class SupportedVideoFormatList : public QList<int>
 {
@@ -171,6 +175,12 @@ private:
 
     void finishRecovery();
 
+#ifdef HAVE_LOGIND_SLEEP
+    void queueLifecycleSleepState(bool sleeping);
+
+    bool processLifecycleSleepState();
+#endif
+
     bool validateLaunch(SDL_Window* testWindow);
 
     void emitLaunchWarning(QString text);
@@ -304,6 +314,12 @@ private:
     RecoverySettings m_RecoverySettings;
     RecoveryPolicy m_RecoveryPolicy;
     QThread* m_RecoveryThread;
+#ifdef HAVE_LOGIND_SLEEP
+    LogindSleepMonitor* m_LogindSleepMonitor;
+    std::atomic_bool m_LifecycleSleepQueued;
+    std::atomic_bool m_LifecycleWakeQueued;
+    std::atomic_bool m_LifecycleSuspended;
+#endif
     std::atomic_bool m_EventLoopRunning;
     std::atomic_bool m_RecoveryMode;
     std::atomic_bool m_ConnectionLossQueued;
