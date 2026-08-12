@@ -918,6 +918,92 @@ Flickable {
         }
 
         GroupBox {
+            id: deckDisplayGroupBox
+            width: (parent.width - (parent.leftPadding + parent.rightPadding))
+            padding: 12
+            title: "<font color=\"skyblue\">" + qsTr("Remote Display") + "</font>"
+            font.pointSize: 12
+
+            Column {
+                anchors.fill: parent
+                spacing: 6
+
+                Row {
+                    spacing: 8
+
+                    Button {
+                        text: qsTr("Desk")
+                        enabled: window.streamingActive &&
+                                 StreamingPreferences.remoteDisplayState !== StreamingPreferences.RDS_PENDING
+                        onClicked: StreamingPreferences.applyRemoteDisplayProfile(StreamingPreferences.RDP_DESK)
+                    }
+
+                    Button {
+                        text: qsTr("Remote")
+                        enabled: window.streamingActive &&
+                                 StreamingPreferences.remoteDisplayState !== StreamingPreferences.RDS_PENDING
+                        onClicked: StreamingPreferences.applyRemoteDisplayProfile(StreamingPreferences.RDP_REMOTE)
+                    }
+
+                    Button {
+                        text: qsTr("TV")
+                        enabled: window.streamingActive &&
+                                 StreamingPreferences.remoteDisplayState !== StreamingPreferences.RDS_PENDING
+                        onClicked: StreamingPreferences.applyRemoteDisplayProfile(StreamingPreferences.RDP_TV)
+                    }
+                }
+
+                Label {
+                    width: parent.width
+                    visible: window.streamingActive
+                    font.pointSize: 9
+                    wrapMode: Text.Wrap
+                    text: {
+                        var profile = qsTr("Display")
+                        if (StreamingPreferences.remoteDisplayProfile === StreamingPreferences.RDP_DESK)
+                            profile = qsTr("Desk")
+                        else if (StreamingPreferences.remoteDisplayProfile === StreamingPreferences.RDP_REMOTE)
+                            profile = qsTr("Remote")
+                        else if (StreamingPreferences.remoteDisplayProfile === StreamingPreferences.RDP_TV)
+                            profile = qsTr("TV")
+
+                        if (StreamingPreferences.remoteDisplayState === StreamingPreferences.RDS_PENDING)
+                            return qsTr("Applying %1...").arg(profile)
+                        if (StreamingPreferences.remoteDisplayState === StreamingPreferences.RDS_APPLIED)
+                            return qsTr("%1 applied").arg(profile)
+                        if (StreamingPreferences.remoteDisplayState === StreamingPreferences.RDS_UNAVAILABLE)
+                            return qsTr("Remote display controller unavailable")
+                        if (StreamingPreferences.remoteDisplayState === StreamingPreferences.RDS_FAILED)
+                            return qsTr("%1 failed; the stream stayed connected").arg(profile)
+                        return qsTr("Commands use the encrypted Sunshine session")
+                    }
+                }
+
+                CheckBox {
+                    width: parent.width
+                    text: qsTr("Apply Remote when the stream starts")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.applyRemoteOnConnect
+                    onClicked: {
+                        StreamingPreferences.applyRemoteOnConnect = checked
+                        StreamingPreferences.applyRemoteDisplayPolicy()
+                    }
+                }
+
+                CheckBox {
+                    width: parent.width
+                    text: qsTr("Restore Desk when the stream disconnects")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.restoreDeskOnDisconnect
+                    onClicked: {
+                        StreamingPreferences.restoreDeskOnDisconnect = checked
+                        StreamingPreferences.applyRemoteDisplayPolicy()
+                    }
+                }
+            }
+        }
+
+        GroupBox {
 
             id: audioSettingsGroupBox
             width: (parent.width - (parent.leftPadding + parent.rightPadding))

@@ -19,6 +19,10 @@ public:
 
     Q_INVOKABLE bool applyLiveBitrate();
 
+    Q_INVOKABLE bool applyRemoteDisplayProfile(int profile);
+
+    Q_INVOKABLE bool applyRemoteDisplayPolicy();
+
     void reload();
 
     enum AudioConfig
@@ -134,6 +138,25 @@ public:
     };
     Q_ENUM(LiveBitrateState);
 
+    enum RemoteDisplayProfile
+    {
+        RDP_NONE = 0,
+        RDP_DESK = 1,
+        RDP_REMOTE = 2,
+        RDP_TV = 3,
+    };
+    Q_ENUM(RemoteDisplayProfile);
+
+    enum RemoteDisplayState
+    {
+        RDS_IDLE,
+        RDS_PENDING,
+        RDS_APPLIED,
+        RDS_UNAVAILABLE,
+        RDS_FAILED,
+    };
+    Q_ENUM(RemoteDisplayState);
+
     Q_PROPERTY(int width MEMBER width NOTIFY displayModeChanged)
     Q_PROPERTY(int height MEMBER height NOTIFY displayModeChanged)
     Q_PROPERTY(int fps MEMBER fps NOTIFY displayModeChanged)
@@ -142,6 +165,10 @@ public:
     Q_PROPERTY(bool autoAdjustBitrate MEMBER autoAdjustBitrate NOTIFY autoAdjustBitrateChanged)
     Q_PROPERTY(LiveBitrateState liveBitrateState MEMBER liveBitrateState NOTIFY liveBitrateStatusChanged)
     Q_PROPERTY(int appliedBitrateKbps MEMBER appliedBitrateKbps NOTIFY liveBitrateStatusChanged)
+    Q_PROPERTY(bool applyRemoteOnConnect MEMBER applyRemoteOnConnect NOTIFY remoteDisplayPolicyChanged)
+    Q_PROPERTY(bool restoreDeskOnDisconnect MEMBER restoreDeskOnDisconnect NOTIFY remoteDisplayPolicyChanged)
+    Q_PROPERTY(RemoteDisplayState remoteDisplayState MEMBER remoteDisplayState NOTIFY remoteDisplayStatusChanged)
+    Q_PROPERTY(RemoteDisplayProfile remoteDisplayProfile MEMBER remoteDisplayProfile NOTIFY remoteDisplayStatusChanged)
     Q_PROPERTY(bool enableVsync MEMBER enableVsync NOTIFY enableVsyncChanged)
     Q_PROPERTY(bool gameOptimizations MEMBER gameOptimizations NOTIFY gameOptimizationsChanged)
     Q_PROPERTY(bool playAudioOnHost MEMBER playAudioOnHost NOTIFY playAudioOnHostChanged)
@@ -186,6 +213,10 @@ public:
     bool autoAdjustBitrate;
     LiveBitrateState liveBitrateState;
     int appliedBitrateKbps;
+    bool applyRemoteOnConnect;
+    bool restoreDeskOnDisconnect;
+    RemoteDisplayState remoteDisplayState;
+    RemoteDisplayProfile remoteDisplayProfile;
     bool enableVsync;
     bool gameOptimizations;
     bool playAudioOnHost;
@@ -226,6 +257,8 @@ signals:
     void unlockBitrateChanged();
     void autoAdjustBitrateChanged();
     void liveBitrateStatusChanged();
+    void remoteDisplayPolicyChanged();
+    void remoteDisplayStatusChanged();
     void enableVsyncChanged();
     void gameOptimizationsChanged();
     void playAudioOnHostChanged();
@@ -267,8 +300,12 @@ private:
     void handleLiveBitrateResult(quint32 requestId, int status,
                                  int appliedBitrateKbps);
 
+    void handleRemoteDisplayResult(quint32 requestId, int status, int profile);
+
     QQmlEngine* m_QmlEngine;
     QTimer m_LiveBitrateTimeout;
     quint32 m_LiveBitrateRequestId;
+    QTimer m_RemoteDisplayTimeout;
+    quint32 m_RemoteDisplayRequestId;
 };
 

@@ -143,6 +143,10 @@ public:
 
     bool requestLiveBitrate(int bitrateKbps, quint32* requestId);
 
+    bool requestRemoteDisplayProfile(int profile, quint32* requestId);
+
+    bool applyRemoteDisplayPolicy();
+
     void setShouldExit(bool quitHostApp = false);
 
 signals:
@@ -164,6 +168,8 @@ signals:
     void launchWarningsChanged();
 
     void liveBitrateResult(quint32 requestId, int status, int appliedBitrateKbps);
+
+    void remoteDisplayResult(quint32 requestId, int status, int profile);
 
 private:
     void exec();
@@ -188,6 +194,12 @@ private:
     void finishRecovery();
 
     void processExtensionMessages();
+
+    uint32_t nextExtensionRequestId();
+
+    bool sendRemoteDisplayPolicy();
+
+    void markIntentionalDisconnect();
 
 #ifdef HAVE_LINUX_LIFECYCLE
     void queueLifecycleSleepState(bool sleeping);

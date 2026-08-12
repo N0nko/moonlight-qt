@@ -1927,6 +1927,11 @@ bool Session::startConnectionAsync(bool recoveryAttempt, bool fastResume)
         return false;
     }
 
+    if (!sendRemoteDisplayPolicy()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Unable to send remote display lifecycle policy");
+    }
+
     if (!recoveryAttempt) {
         emit connectionStarted();
     }
@@ -2706,6 +2711,9 @@ void Session::exec()
     }
 
 DispatchDeferredCleanup:
+    if (!m_UnexpectedTermination && !m_RecoveryMode.load()) {
+        markIntentionalDisconnect();
+    }
     m_EventLoopRunning.store(false);
 #ifdef HAVE_LINUX_LIFECYCLE
     if (m_LinuxLifecycleMonitor != nullptr) {
