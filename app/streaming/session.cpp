@@ -65,7 +65,7 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clSetMotionEventState,
     Session::clSetControllerLED,
     Session::clSetAdaptiveTriggers,
-    nullptr
+    Session::clExtensionMessage
 };
 
 Session* Session::s_ActiveSession;
@@ -616,6 +616,9 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_NetworkUnavailable(false),
 #endif
       m_EventLoopRunning(false),
+      m_ExtensionMessageQueued(false),
+      m_NextExtensionRequestId(1),
+      m_DesiredBitrateKbps(m_Preferences->bitrateKbps),
       m_RecoveryMode(false),
       m_ConnectionLossQueued(false),
       m_FramePresentedQueued(false),
@@ -2193,6 +2196,7 @@ void Session::exec()
                 break;
             case SDL_CODE_CONNECTION_STATE_CHANGED:
             case SDL_CODE_FRAME_PRESENTED:
+            case kSdlCodeExtensionMessage:
 #ifdef HAVE_LINUX_LIFECYCLE
             case kSdlCodeLifecycleStateChanged:
 #endif

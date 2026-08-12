@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QRect>
 #include <QQmlEngine>
+#include <QTimer>
 
 class StreamingPreferences : public QObject
 {
@@ -15,6 +16,8 @@ public:
     getDefaultBitrate(int width, int height, int fps, bool yuv444);
 
     Q_INVOKABLE void save();
+
+    Q_INVOKABLE bool applyLiveBitrate();
 
     void reload();
 
@@ -119,12 +122,26 @@ public:
     };
     Q_ENUM(CaptureSysKeysMode);
 
+    enum LiveBitrateState
+    {
+        LBS_IDLE,
+        LBS_PENDING,
+        LBS_APPLIED,
+        LBS_CLAMPED,
+        LBS_FAILED,
+        LBS_UNSUPPORTED,
+        LBS_TIMED_OUT,
+    };
+    Q_ENUM(LiveBitrateState);
+
     Q_PROPERTY(int width MEMBER width NOTIFY displayModeChanged)
     Q_PROPERTY(int height MEMBER height NOTIFY displayModeChanged)
     Q_PROPERTY(int fps MEMBER fps NOTIFY displayModeChanged)
     Q_PROPERTY(int bitrateKbps MEMBER bitrateKbps NOTIFY bitrateChanged)
     Q_PROPERTY(bool unlockBitrate MEMBER unlockBitrate NOTIFY unlockBitrateChanged)
     Q_PROPERTY(bool autoAdjustBitrate MEMBER autoAdjustBitrate NOTIFY autoAdjustBitrateChanged)
+    Q_PROPERTY(LiveBitrateState liveBitrateState MEMBER liveBitrateState NOTIFY liveBitrateStatusChanged)
+    Q_PROPERTY(int appliedBitrateKbps MEMBER appliedBitrateKbps NOTIFY liveBitrateStatusChanged)
     Q_PROPERTY(bool enableVsync MEMBER enableVsync NOTIFY enableVsyncChanged)
     Q_PROPERTY(bool gameOptimizations MEMBER gameOptimizations NOTIFY gameOptimizationsChanged)
     Q_PROPERTY(bool playAudioOnHost MEMBER playAudioOnHost NOTIFY playAudioOnHostChanged)
@@ -167,6 +184,8 @@ public:
     int bitrateKbps;
     bool unlockBitrate;
     bool autoAdjustBitrate;
+    LiveBitrateState liveBitrateState;
+    int appliedBitrateKbps;
     bool enableVsync;
     bool gameOptimizations;
     bool playAudioOnHost;
@@ -206,6 +225,7 @@ signals:
     void bitrateChanged();
     void unlockBitrateChanged();
     void autoAdjustBitrateChanged();
+    void liveBitrateStatusChanged();
     void enableVsyncChanged();
     void gameOptimizationsChanged();
     void playAudioOnHostChanged();
@@ -244,6 +264,11 @@ private:
 
     QString getSuffixFromLanguage(Language lang);
 
+    void handleLiveBitrateResult(quint32 requestId, int status,
+                                 int appliedBitrateKbps);
+
     QQmlEngine* m_QmlEngine;
+    QTimer m_LiveBitrateTimeout;
+    quint32 m_LiveBitrateRequestId;
 };
 

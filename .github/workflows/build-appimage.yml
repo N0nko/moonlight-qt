@@ -152,7 +152,7 @@ jobs:
           wget https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy*.AppImage
 
-      - name: Test stream recovery policy
+      - name: Test stream policies
         run: |
           c++ -std=c++17 -Wall -Wextra -Werror \
             app/streaming/lifecycle/recoverypolicy.cpp \
@@ -160,6 +160,10 @@ jobs:
             tests/recoverypolicy_test.cpp \
             -o /tmp/recoverypolicy-test
           /tmp/recoverypolicy-test
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            tests/deckprotocol_test.cpp \
+            -o /tmp/deckprotocol-test
+          /tmp/deckprotocol-test
 
       - name: Build Binaries
         run: |

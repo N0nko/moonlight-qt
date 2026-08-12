@@ -118,6 +118,7 @@ void Session::startRecoveryAttempt()
     SDL_assert(m_RecoveryThread == nullptr);
 
     m_RecoveryGamepadMask = m_InputHandler->getAttachedGamepadMask();
+    m_StreamConfig.bitrate = m_DesiredBitrateKbps.load();
     regenerateRemoteInputCredentials();
     m_AsyncConnectionSuccess.store(false);
     m_AttemptTerminated.store(false);
@@ -331,6 +332,8 @@ bool Session::applyRecoveryAction(RecoveryPolicy::Action action)
 
 bool Session::processRecoveryEvents()
 {
+    processExtensionMessages();
+
 #ifdef HAVE_LINUX_LIFECYCLE
     if (!processLifecycleState()) {
         return false;
