@@ -12,9 +12,9 @@ include(../globaldefs.pri)
 
 linux:!config_SL {
     QT += dbus
-    DEFINES += HAVE_LOGIND_SLEEP
-    SOURCES += streaming/lifecycle/logindsleepmonitor.cpp
-    HEADERS += streaming/lifecycle/logindsleepmonitor.h
+    DEFINES += HAVE_LINUX_LIFECYCLE
+    SOURCES += streaming/lifecycle/linuxlifecyclemonitor.cpp
+    HEADERS += streaming/lifecycle/linuxlifecyclemonitor.h
 }
 
 # Precompile QML files to avoid writing qmlcache on portable versions.

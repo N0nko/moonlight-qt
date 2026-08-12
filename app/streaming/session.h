@@ -16,8 +16,8 @@
 #include <atomic>
 
 class QThread;
-#ifdef HAVE_LOGIND_SLEEP
-class LogindSleepMonitor;
+#ifdef HAVE_LINUX_LIFECYCLE
+class LinuxLifecycleMonitor;
 constexpr int kSdlCodeLifecycleStateChanged = 108;
 #endif
 
@@ -175,10 +175,16 @@ private:
 
     void finishRecovery();
 
-#ifdef HAVE_LOGIND_SLEEP
+#ifdef HAVE_LINUX_LIFECYCLE
     void queueLifecycleSleepState(bool sleeping);
 
-    bool processLifecycleSleepState();
+    void queueLifecycleNetworkState(bool available);
+
+    bool processLifecycleState();
+
+    void suspendConnectionForLifecycle();
+
+    bool resumeConnectionForLifecycle();
 #endif
 
     bool validateLaunch(SDL_Window* testWindow);
@@ -314,11 +320,14 @@ private:
     RecoverySettings m_RecoverySettings;
     RecoveryPolicy m_RecoveryPolicy;
     QThread* m_RecoveryThread;
-#ifdef HAVE_LOGIND_SLEEP
-    LogindSleepMonitor* m_LogindSleepMonitor;
+#ifdef HAVE_LINUX_LIFECYCLE
+    LinuxLifecycleMonitor* m_LinuxLifecycleMonitor;
     std::atomic_bool m_LifecycleSleepQueued;
     std::atomic_bool m_LifecycleWakeQueued;
     std::atomic_bool m_LifecycleSuspended;
+    std::atomic_bool m_NetworkStateQueued;
+    std::atomic_bool m_NetworkAvailable;
+    std::atomic_bool m_NetworkUnavailable;
 #endif
     std::atomic_bool m_EventLoopRunning;
     std::atomic_bool m_RecoveryMode;

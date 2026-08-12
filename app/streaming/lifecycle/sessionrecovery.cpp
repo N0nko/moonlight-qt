@@ -1,8 +1,8 @@
 #include "streaming/session.h"
 
 #include "connectionstartthread.h"
-#ifdef HAVE_LOGIND_SLEEP
-#include "logindsleepmonitor.h"
+#ifdef HAVE_LINUX_LIFECYCLE
+#include "linuxlifecyclemonitor.h"
 #endif
 
 #include "SDL_compat.h"
@@ -155,7 +155,7 @@ void Session::finishRecovery()
     m_InputHandler->updatePointerRegionLock();
 }
 
-#ifdef HAVE_LOGIND_SLEEP
+#ifdef HAVE_LINUX_LIFECYCLE
 void Session::queueLifecycleSleepState(bool sleeping)
 {
     if (!m_EventLoopRunning.load()) {
@@ -174,44 +174,101 @@ void Session::queueLifecycleSleepState(bool sleeping)
     }
 }
 
-bool Session::processLifecycleSleepState()
+void Session::queueLifecycleNetworkState(bool available)
+{
+    if (!m_EventLoopRunning.load()) {
+        return;
+    }
+
+    m_NetworkAvailable.store(available);
+    if (!m_NetworkStateQueued.exchange(true)) {
+        SDL_Event event = {};
+        event.type = SDL_USEREVENT;
+        event.user.code = kSdlCodeLifecycleStateChanged;
+        if (SDL_PushEvent(&event) != 1) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Unable to wake SDL for network transition");
+        }
+    }
+}
+
+void Session::suspendConnectionForLifecycle()
+{
+    m_RecoveryMode.store(true);
+    m_RecoveryPolicy.suspend();
+
+    if (m_RecoveryThread != nullptr) {
+        LiInterruptConnection();
+        m_RecoveryThread->wait();
+        delete m_RecoveryThread;
+        m_RecoveryThread = nullptr;
+    }
+
+    stopConnectionForRecovery();
+    m_ConnectionLossQueued.store(false);
+    m_FramePresentedQueued.store(false);
+    m_AttemptTerminated.store(false);
+    m_LastConnectionError.store(0);
+}
+
+bool Session::resumeConnectionForLifecycle()
+{
+    m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
+                                       "Reconnecting to PC...");
+    m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
+    return applyRecoveryAction(m_RecoveryPolicy.begin(SDL_GetTicks(), 0));
+}
+
+bool Session::processLifecycleState()
 {
     if (m_LifecycleSleepQueued.exchange(false)) {
         if (!m_LifecycleSuspended.exchange(true)) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Quiescing the stream before system sleep");
-
-            m_RecoveryMode.store(true);
-            m_RecoveryPolicy.suspend();
-
-            if (m_RecoveryThread != nullptr) {
-                LiInterruptConnection();
-                m_RecoveryThread->wait();
-                delete m_RecoveryThread;
-                m_RecoveryThread = nullptr;
+            if (!m_NetworkUnavailable.load()) {
+                suspendConnectionForLifecycle();
             }
-
-            stopConnectionForRecovery();
-            m_ConnectionLossQueued.store(false);
-            m_FramePresentedQueued.store(false);
-            m_AttemptTerminated.store(false);
-            m_LastConnectionError.store(0);
         }
 
-        if (m_LogindSleepMonitor != nullptr) {
-            m_LogindSleepMonitor->acknowledgeSleepReady();
+        if (m_LinuxLifecycleMonitor != nullptr) {
+            m_LinuxLifecycleMonitor->acknowledgeSleepReady();
+        }
+    }
+
+    if (m_NetworkStateQueued.exchange(false)) {
+        const bool available = m_NetworkAvailable.load();
+        if (!available) {
+            if (!m_NetworkUnavailable.exchange(true) &&
+                    !m_LifecycleSuspended.load()) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "Network unavailable; pausing stream recovery");
+                suspendConnectionForLifecycle();
+                m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
+                                                   "Waiting for network...");
+                m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
+            }
+        }
+        else if (m_NetworkUnavailable.exchange(false) &&
+                 !m_LifecycleSuspended.load()) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Network available; resuming in the existing stream window");
+            if (!resumeConnectionForLifecycle()) {
+                return false;
+            }
         }
     }
 
     if (m_LifecycleWakeQueued.exchange(false)) {
         if (m_LifecycleSuspended.exchange(false)) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "System wake received; resuming in the existing stream window");
+                        "System wake received in the existing stream window");
 
-            m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
-                                               "Reconnecting to PC...");
-            m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
-            if (!applyRecoveryAction(m_RecoveryPolicy.begin(SDL_GetTicks(), 0))) {
+            if (m_NetworkUnavailable.load()) {
+                m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
+                                                   "Waiting for network...");
+                m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
+            }
+            else if (!resumeConnectionForLifecycle()) {
                 return false;
             }
         }
@@ -274,12 +331,12 @@ bool Session::applyRecoveryAction(RecoveryPolicy::Action action)
 
 bool Session::processRecoveryEvents()
 {
-#ifdef HAVE_LOGIND_SLEEP
-    if (!processLifecycleSleepState()) {
+#ifdef HAVE_LINUX_LIFECYCLE
+    if (!processLifecycleState()) {
         return false;
     }
 
-    if (m_LifecycleSuspended.load()) {
+    if (m_LifecycleSuspended.load() || m_NetworkUnavailable.load()) {
         return true;
     }
 #endif

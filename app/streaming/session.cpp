@@ -3,8 +3,8 @@
 #include "streaming/streamutils.h"
 #include "backend/richpresencemanager.h"
 #include "lifecycle/connectionstartthread.h"
-#ifdef HAVE_LOGIND_SLEEP
-#include "lifecycle/logindsleepmonitor.h"
+#ifdef HAVE_LINUX_LIFECYCLE
+#include "lifecycle/linuxlifecyclemonitor.h"
 #endif
 
 #include <Limelight.h>
@@ -606,11 +606,14 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_RecoverySettings(RecoverySettings::fromEnvironment()),
       m_RecoveryPolicy(m_RecoverySettings.policyConfig()),
       m_RecoveryThread(nullptr),
-#ifdef HAVE_LOGIND_SLEEP
-      m_LogindSleepMonitor(nullptr),
+#ifdef HAVE_LINUX_LIFECYCLE
+      m_LinuxLifecycleMonitor(nullptr),
       m_LifecycleSleepQueued(false),
       m_LifecycleWakeQueued(false),
       m_LifecycleSuspended(false),
+      m_NetworkStateQueued(false),
+      m_NetworkAvailable(true),
+      m_NetworkUnavailable(false),
 #endif
       m_EventLoopRunning(false),
       m_RecoveryMode(false),
@@ -2091,11 +2094,15 @@ void Session::exec()
     m_RecoveryPolicy.markStreaming();
     m_EventLoopRunning.store(true);
 
-#ifdef HAVE_LOGIND_SLEEP
-    m_LogindSleepMonitor = new LogindSleepMonitor([this](bool sleeping) {
-        queueLifecycleSleepState(sleeping);
-    });
-    m_LogindSleepMonitor->start();
+#ifdef HAVE_LINUX_LIFECYCLE
+    m_LinuxLifecycleMonitor = new LinuxLifecycleMonitor(
+                [this](bool sleeping) {
+                    queueLifecycleSleepState(sleeping);
+                },
+                [this](bool available) {
+                    queueLifecycleNetworkState(available);
+                });
+    m_LinuxLifecycleMonitor->start();
 #endif
 
     // Hijack this thread to be the SDL main thread. We have to do this
@@ -2117,8 +2124,8 @@ void Session::exec()
         // issues that could cause indefinite timeouts, delayed joystick detection,
         // and other problems.
         int eventTimeout = m_RecoveryMode.load() ? 25 : 1000;
-#ifdef HAVE_LOGIND_SLEEP
-        if (m_LifecycleSuspended.load()) {
+#ifdef HAVE_LINUX_LIFECYCLE
+        if (m_LifecycleSuspended.load() || m_NetworkUnavailable.load()) {
             eventTimeout = 1000;
         }
 #endif
@@ -2186,7 +2193,7 @@ void Session::exec()
                 break;
             case SDL_CODE_CONNECTION_STATE_CHANGED:
             case SDL_CODE_FRAME_PRESENTED:
-#ifdef HAVE_LOGIND_SLEEP
+#ifdef HAVE_LINUX_LIFECYCLE
             case kSdlCodeLifecycleStateChanged:
 #endif
                 // These events only wake the SDL thread. State is consumed at
@@ -2398,11 +2405,11 @@ void Session::exec()
 
 DispatchDeferredCleanup:
     m_EventLoopRunning.store(false);
-#ifdef HAVE_LOGIND_SLEEP
-    if (m_LogindSleepMonitor != nullptr) {
-        m_LogindSleepMonitor->stopMonitoring();
-        delete m_LogindSleepMonitor;
-        m_LogindSleepMonitor = nullptr;
+#ifdef HAVE_LINUX_LIFECYCLE
+    if (m_LinuxLifecycleMonitor != nullptr) {
+        m_LinuxLifecycleMonitor->stopMonitoring();
+        delete m_LinuxLifecycleMonitor;
+        m_LinuxLifecycleMonitor = nullptr;
     }
 #endif
     m_RecoveryPolicy.stop();
