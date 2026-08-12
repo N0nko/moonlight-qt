@@ -187,6 +187,12 @@ private:
 
     void sendGamepadBatteryState(GamepadState* state, SDL_JoystickPowerLevel level);
 
+    void refreshAttachedGamepads(bool reannounce);
+
+    void raiseAllGamepadInputs();
+
+    void releaseHostInput(bool releaseGamepads);
+
     void handleAbsoluteFingerEvent(SDL_TouchFingerEvent* event);
 
     void emulateAbsoluteFingerEvent(SDL_TouchFingerEvent* event);
@@ -214,6 +220,7 @@ private:
 
     SDL_Window* m_Window;
     bool m_MultiController;
+    bool m_BackgroundGamepad;
     bool m_GamepadMouse;
     bool m_SwapMouseButtons;
     bool m_ReverseScrollDirection;
