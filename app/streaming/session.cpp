@@ -667,7 +667,7 @@ Session::getDecoderAvailability(SDL_Window* window,
                        StreamingPreferences::RS_PROBE_ONLY,
                        window, videoFormat, width, height, frameRate,
                        false, false, true, decoder)) {
-        return DecoderAvailability::None;
+        return DecoderAvailability::Unavailable;
     }
 
     bool hw = decoder->isHardwareAccelerated();
@@ -948,7 +948,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
                                              m_StreamConfig.width,
                                              m_StreamConfig.height,
                                              m_StreamConfig.fps);
-        if (hevcDA == DecoderAvailability::None && m_Preferences->enableHdr) {
+        if (hevcDA == DecoderAvailability::Unavailable && m_Preferences->enableHdr) {
             // Remove all 10-bit HEVC profiles
             m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_H265 & VIDEO_FORMAT_MASK_10BIT);
 
@@ -959,7 +959,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
                                                 m_StreamConfig.width,
                                                 m_StreamConfig.height,
                                                 m_StreamConfig.fps);
-            if (av1DA == DecoderAvailability::None) {
+            if (av1DA == DecoderAvailability::Unavailable) {
                 // Remove all 10-bit AV1 profiles
                 m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_AV1 & VIDEO_FORMAT_MASK_10BIT);
 
@@ -1284,7 +1284,7 @@ bool Session::validateLaunch(SDL_Window* testWindow)
                                                  m_StreamConfig.width,
                                                  m_StreamConfig.height,
                                                  m_StreamConfig.fps);
-                if (da == DecoderAvailability::None) {
+                if (da == DecoderAvailability::Unavailable) {
                     emitLaunchWarning(tr("This PC's GPU doesn't support AV1 Main10 decoding for HDR streaming."));
                     m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_AV1_MAIN10);
                 }
@@ -1302,7 +1302,7 @@ bool Session::validateLaunch(SDL_Window* testWindow)
                                                  m_StreamConfig.width,
                                                  m_StreamConfig.height,
                                                  m_StreamConfig.fps);
-                if (da == DecoderAvailability::None) {
+                if (da == DecoderAvailability::Unavailable) {
                     emitLaunchWarning(tr("This PC's GPU doesn't support HEVC Main10 decoding for HDR streaming."));
                     m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_H265_MAIN10);
                 }
