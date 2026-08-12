@@ -231,7 +231,7 @@ private:
                               void* framePresentedContext = nullptr);
 
     enum class DecoderAvailability {
-        None,
+        Unavailable,
         Software,
         Hardware
     };
