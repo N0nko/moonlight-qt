@@ -156,6 +156,7 @@ jobs:
         run: |
           c++ -std=c++17 -Wall -Wextra -Werror \
             app/streaming/lifecycle/recoverypolicy.cpp \
+            app/streaming/lifecycle/recoverysettings.cpp \
             tests/recoverypolicy_test.cpp \
             -o /tmp/recoverypolicy-test
           /tmp/recoverypolicy-test

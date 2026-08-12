@@ -1,8 +1,10 @@
 #include "../app/streaming/lifecycle/recoverypolicy.h"
+#include "../app/streaming/lifecycle/recoverysettings.h"
 
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <string>
 
 namespace {
 constexpr RecoveryPolicy::Config kConfig = {15000, 3000, 2500, 150};
@@ -16,6 +18,46 @@ void check(bool condition, const char* expression, int line)
 }
 
 #define CHECK(expression) check((expression), #expression, __LINE__)
+
+void setEnvironment(const char* name, const char* value)
+{
+#ifdef _WIN32
+    _putenv_s(name, value != nullptr ? value : "");
+#else
+    if (value != nullptr) {
+        setenv(name, value, 1);
+    }
+    else {
+        unsetenv(name);
+    }
+#endif
+}
+
+class ScopedEnvironment
+{
+public:
+    ScopedEnvironment(const char* name, const char* value)
+        : m_Name(name)
+    {
+        const char* previous = std::getenv(name);
+        if (previous != nullptr) {
+            m_HadPreviousValue = true;
+            m_PreviousValue = previous;
+        }
+        setEnvironment(name, value);
+    }
+
+    ~ScopedEnvironment()
+    {
+        setEnvironment(m_Name.c_str(),
+                       m_HadPreviousValue ? m_PreviousValue.c_str() : nullptr);
+    }
+
+private:
+    std::string m_Name;
+    std::string m_PreviousValue;
+    bool m_HadPreviousValue = false;
+};
 
 void requiresPresentedFrame()
 {
@@ -83,6 +125,21 @@ void suspendsWithoutRetrying()
     CHECK(policy.tick(50000) == RecoveryPolicy::Action::None);
     CHECK(policy.begin(50000, -1) == RecoveryPolicy::Action::StartConnection);
 }
+
+void readsBoundedCompatibilitySettings()
+{
+    ScopedEnvironment window("MOONLIGHT_RECONNECT_WINDOW_MS", "1200");
+    ScopedEnvironment video("MOONLIGHT_RECONNECT_VIDEO_STALL_MS", "12000");
+    ScopedEnvironment control("MOONLIGHT_RECONNECT_CONTROL_TIMEOUT_MS", "invalid");
+    ScopedEnvironment connect("MOONLIGHT_RECONNECT_CONNECT_TIMEOUT_MS", "500");
+
+    const RecoverySettings settings = RecoverySettings::fromEnvironment();
+    CHECK(settings.recoveryWindowMs == 1200);
+    CHECK(settings.videoStallTimeoutMs == 12000);
+    CHECK(settings.controlInactivityTimeoutMs == 3000);
+    CHECK(settings.controlConnectTimeoutMs == 750);
+    CHECK(settings.policyConfig().recoveryWindowMs == 1200);
+}
 }
 
 int main()
@@ -93,5 +150,6 @@ int main()
     stopsAtRecoveryDeadline();
     survivesTickWraparound();
     suspendsWithoutRetrying();
+    readsBoundedCompatibilitySettings();
     return EXIT_SUCCESS;
 }

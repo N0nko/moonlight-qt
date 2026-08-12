@@ -2,6 +2,7 @@
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"
 #include "backend/richpresencemanager.h"
+#include "lifecycle/connectionstartthread.h"
 
 #include <Limelight.h>
 #include "SDL_compat.h"
@@ -28,8 +29,8 @@
 #define SDL_CODE_GAMECONTROLLER_SET_MOTION_EVENT_STATE 103
 #define SDL_CODE_GAMECONTROLLER_SET_CONTROLLER_LED 104
 #define SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS 105
-
-#include <openssl/rand.h>
+#define SDL_CODE_CONNECTION_STATE_CHANGED 106
+#define SDL_CODE_FRAME_PRESENTED 107
 
 #include <QtEndian>
 #include <QCoreApplication>
@@ -60,7 +61,8 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clRumbleTriggers,
     Session::clSetMotionEventState,
     Session::clSetControllerLED,
-    Session::clSetAdaptiveTriggers
+    Session::clSetAdaptiveTriggers,
+    nullptr
 };
 
 Session* Session::s_ActiveSession;
@@ -68,6 +70,13 @@ QSemaphore Session::s_ActiveSessionSemaphore(1);
 
 void Session::clStageStarting(int stage)
 {
+    if (s_ActiveSession->m_RecoveryMode.load()) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Recovery stage: %s",
+                    LiGetStageName(stage));
+        return;
+    }
+
     // We know this is called on the same thread as LiStartConnection()
     // which happens to be the main thread, so it's cool to interact
     // with the GUI in these callbacks.
@@ -76,6 +85,15 @@ void Session::clStageStarting(int stage)
 
 void Session::clStageFailed(int stage, int errorCode)
 {
+    if (s_ActiveSession->m_RecoveryMode.load()) {
+        s_ActiveSession->m_LastConnectionError.store(errorCode);
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Recovery stage failed: %s (%d)",
+                    LiGetStageName(stage),
+                    errorCode);
+        return;
+    }
+
     // Perform the port test now, while we're on the async connection thread and not blocking the UI.
     unsigned int portFlags = LiGetPortFlagsFromStage(stage);
     s_ActiveSession->m_PortTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
@@ -87,58 +105,35 @@ void Session::clStageFailed(int stage, int errorCode)
 
 void Session::clConnectionTerminated(int errorCode)
 {
-    unsigned int portFlags = LiGetPortFlagsFromTerminationErrorCode(errorCode);
-    s_ActiveSession->m_PortTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
-
-    // Display the termination dialog if this was not intended
-    switch (errorCode) {
-    case ML_ERROR_GRACEFUL_TERMINATION:
-        break;
-
-    case ML_ERROR_NO_VIDEO_TRAFFIC:
-        s_ActiveSession->m_UnexpectedTermination = true;
-
-        char ports[128];
-        SDL_assert(portFlags != 0);
-        LiStringifyPortFlags(portFlags, ", ", ports, sizeof(ports));
-        emit s_ActiveSession->displayLaunchError(tr("No video received from host.") + "\n\n"+
-                                                 tr("Check your firewall and port forwarding rules for port(s): %1").arg(ports));
-        break;
-
-    case ML_ERROR_NO_VIDEO_FRAME:
-        s_ActiveSession->m_UnexpectedTermination = true;
-        emit s_ActiveSession->displayLaunchError(tr("Your network connection isn't performing well. Reduce your video bitrate setting or try a faster connection."));
-        break;
-
-    case ML_ERROR_PROTECTED_CONTENT:
-    case ML_ERROR_UNEXPECTED_EARLY_TERMINATION:
-        s_ActiveSession->m_UnexpectedTermination = true;
-        emit s_ActiveSession->displayLaunchError(tr("Something went wrong on your host PC when starting the stream.") + "\n\n" +
-                                                 tr("Make sure you don't have any DRM-protected content open on your host PC. You can also try restarting your host PC."));
-        break;
-
-    case ML_ERROR_FRAME_CONVERSION:
-        s_ActiveSession->m_UnexpectedTermination = true;
-        emit s_ActiveSession->displayLaunchError(tr("The host PC reported a fatal video encoding error.") + "\n\n" +
-                                                 tr("Try disabling HDR mode, changing the streaming resolution, or changing your host PC's display resolution."));
-        break;
-
-    default:
-        s_ActiveSession->m_UnexpectedTermination = true;
-
-        // We'll assume large errors are hex values
-        bool hexError = qAbs(errorCode) > 1000;
-        emit s_ActiveSession->displayLaunchError(tr("Connection terminated") + "\n\n" +
-                                                 tr("Error code: %1").arg(errorCode, hexError ? 8 : 0, hexError ? 16 : 10, QChar('0')));
-        break;
+    Session* session = s_ActiveSession;
+    if (session == nullptr) {
+        return;
     }
 
     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                  "Connection terminated: %d",
                  errorCode);
 
+    session->m_LastConnectionError.store(errorCode);
+    session->m_AttemptTerminated.store(true);
+
+    if (session->m_EventLoopRunning.load()) {
+        if (!session->m_ConnectionLossQueued.exchange(true)) {
+            SDL_Event event = {};
+            event.type = SDL_USEREVENT;
+            event.user.code = SDL_CODE_CONNECTION_STATE_CHANGED;
+            if (SDL_PushEvent(&event) != 1) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "Unable to wake SDL for connection termination");
+            }
+        }
+        return;
+    }
+
+    session->reportConnectionTermination(errorCode);
+
     // Push a quit event to the main loop
-    SDL_Event event;
+    SDL_Event event = {};
     event.type = SDL_QUIT;
     event.quit.timestamp = SDL_GetTicks();
     SDL_PushEvent(&event);
@@ -175,7 +170,8 @@ void Session::clConnectionStatusUpdate(int connectionStatus)
                 "Connection status update: %d",
                 connectionStatus);
 
-    if (!s_ActiveSession->m_Preferences->connectionWarnings) {
+    if (s_ActiveSession->m_RecoveryMode.load() ||
+            !s_ActiveSession->m_Preferences->connectionWarnings) {
         return;
     }
 
@@ -391,6 +387,24 @@ int Session::drSubmitDecodeUnit(PDECODE_UNIT du)
     }
 }
 
+void Session::drFramePresented(void* context)
+{
+    Session* session = static_cast<Session*>(context);
+    if (session == nullptr || !session->m_EventLoopRunning.load()) {
+        return;
+    }
+
+    if (!session->m_FramePresentedQueued.exchange(true)) {
+        SDL_Event event = {};
+        event.type = SDL_USEREVENT;
+        event.user.code = SDL_CODE_FRAME_PRESENTED;
+        if (SDL_PushEvent(&event) != 1) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Unable to wake SDL for first presented frame");
+        }
+    }
+}
+
 void Session::getDecoderInfo(SDL_Window* window,
                              bool& isHardwareAccelerated, bool& isFullScreenOnly,
                              bool& isHdrSupported, QSize& maxResolution)
@@ -586,7 +600,17 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_CurrentDisplayIndex(-1),
       m_NeedsPostDecoderCreationCapture(false),
       m_ShouldExit(false),
+      m_RecoverySettings(RecoverySettings::fromEnvironment()),
+      m_RecoveryPolicy(m_RecoverySettings.policyConfig()),
+      m_RecoveryThread(nullptr),
+      m_EventLoopRunning(false),
+      m_RecoveryMode(false),
+      m_ConnectionLossQueued(false),
+      m_FramePresentedQueued(false),
+      m_AttemptTerminated(false),
       m_AsyncConnectionSuccess(false),
+      m_LastConnectionError(0),
+      m_RecoveryGamepadMask(0),
       m_PortTestResults(0),
       m_OpusDecoder(nullptr),
       m_AudioRenderer(nullptr),
@@ -705,11 +729,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
                 "Video bitrate: %d kbps",
                 m_StreamConfig.bitrate);
 
-    RAND_bytes(reinterpret_cast<unsigned char*>(m_StreamConfig.remoteInputAesKey),
-               sizeof(m_StreamConfig.remoteInputAesKey));
-
-    // Only the first 4 bytes are populated in the RI key IV
-    RAND_bytes(reinterpret_cast<unsigned char*>(m_StreamConfig.remoteInputAesIv), 4);
+    regenerateRemoteInputCredentials();
 
     switch (m_Preferences->audioConfig)
     {
@@ -1565,26 +1585,8 @@ void Session::notifyMouseEmulationMode(bool enabled)
     }
 }
 
-class AsyncConnectionStartThread : public QThread
-{
-public:
-    AsyncConnectionStartThread(Session* session) :
-        QThread(nullptr),
-        m_Session(session)
-    {
-        setObjectName("Async Conn Start");
-    }
-
-    void run() override
-    {
-        m_Session->m_AsyncConnectionSuccess = m_Session->startConnectionAsync();
-    }
-
-    Session* m_Session;
-};
-
 // Called in a non-main thread
-bool Session::startConnectionAsync()
+bool Session::startConnectionAsync(bool recoveryAttempt, bool fastResume)
 {
     // The UI should have ensured the old game was already quit
     // if we decide to stream a different game.
@@ -1618,19 +1620,45 @@ bool Session::startConnectionAsync()
 
     try {
         NvHTTP http(m_Computer);
-        http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
+        const int gamepadMask = recoveryAttempt ?
+                    m_RecoveryGamepadMask :
+                    m_InputHandler->getAttachedGamepadMask();
+        NvStartAppOptions startOptions;
+        if (recoveryAttempt) {
+            const bool localRoute = m_StreamConfig.streamingRemotely == STREAM_CFG_LOCAL;
+            startOptions.timeoutMs = localRoute ? 2000 : 6000;
+            startOptions.reconnect = true;
+            startOptions.fastResume = fastResume && localRoute;
+        }
+
+        http.startApp(recoveryAttempt || m_Computer->currentGameId != 0 ? "resume" : "launch",
                       m_Computer->isNvidiaServerSoftware,
                       m_App.id, &m_StreamConfig,
                       enableGameOptimizations,
                       m_Preferences->playAudioOnHost,
-                      m_InputHandler->getAttachedGamepadMask(),
+                      gamepadMask,
                       !m_Preferences->multiController,
-                      rtspSessionUrl);
+                      rtspSessionUrl,
+                      startOptions);
     } catch (const GfeHttpResponseException& e) {
-        emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
+        if (recoveryAttempt) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Recovery HTTP request failed: %s",
+                        e.what());
+        }
+        else {
+            emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
+        }
         return false;
     } catch (const QtNetworkReplyException& e) {
-        emit displayLaunchError(e.toQString());
+        if (recoveryAttempt) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Recovery network request failed: %s",
+                        e.what());
+        }
+        else {
+            emit displayLaunchError(e.toQString());
+        }
         return false;
     }
 
@@ -1658,7 +1686,7 @@ bool Session::startConnectionAsync()
         hostInfo.rtspSessionUrl = rtspSessionUrlStr.data();
     }
 
-    if (m_Preferences->packetSize != 0) {
+    if (!recoveryAttempt && m_Preferences->packetSize != 0) {
         // Override default packet size and remote streaming detection
         // NB: Using STREAM_CFG_AUTO will cap our packet size at 1024 for remote hosts.
         m_StreamConfig.streamingRemotely = STREAM_CFG_LOCAL;
@@ -1667,7 +1695,7 @@ bool Session::startConnectionAsync()
                     "Using custom packet size: %d bytes",
                     m_Preferences->packetSize);
     }
-    else {
+    else if (!recoveryAttempt) {
         // Use 1392 byte video packets by default
         m_StreamConfig.packetSize = 1392;
 
@@ -1698,7 +1726,8 @@ bool Session::startConnectionAsync()
     // had if the host supported YUV444 (though obviously with 4:2:0 subsampling).
     // If the user has adjusted the bitrate from default, we'll assume they really wanted
     // that value and not second guess them.
-    if (m_Preferences->enableYUV444 &&
+    if (!recoveryAttempt &&
+        m_Preferences->enableYUV444 &&
         !(m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_YUV444) &&
         m_StreamConfig.bitrate == StreamingPreferences::getDefaultBitrate(m_StreamConfig.width,
                                                                           m_StreamConfig.height,
@@ -1710,8 +1739,26 @@ bool Session::startConnectionAsync()
                                                                          false);
     }
 
-    int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
-                                &m_VideoCallbacks, &m_AudioCallbacks,
+    if (!m_Computer->isNvidiaServerSoftware) {
+        const bool localRoute = m_StreamConfig.streamingRemotely == STREAM_CFG_LOCAL;
+        // Keep aggressive failure detection LAN-only. A video-only stall may
+        // be congestion, so its threshold intentionally remains much longer.
+        m_StreamConfig.videoStallTimeoutMs = localRoute ?
+                    static_cast<int>(m_RecoverySettings.videoStallTimeoutMs) : 0;
+        m_StreamConfig.controlInactivityTimeoutMs = localRoute ?
+                    static_cast<int>(m_RecoverySettings.controlInactivityTimeoutMs) : 0;
+        m_StreamConfig.controlConnectTimeoutMs = recoveryAttempt && localRoute ?
+                    static_cast<int>(m_RecoverySettings.controlConnectTimeoutMs) : 0;
+    }
+
+    // common-c fills null callback slots in place, so every generation needs
+    // fresh tables. Reusing a mutated pull-renderer table can make a second
+    // connection look like an invalid push-plus-pull renderer.
+    CONNECTION_LISTENER_CALLBACKS connCallbacks = k_ConnCallbacks;
+    DECODER_RENDERER_CALLBACKS videoCallbacks = m_VideoCallbacks;
+    AUDIO_RENDERER_CALLBACKS audioCallbacks = m_AudioCallbacks;
+    int err = LiStartConnection(&hostInfo, &m_StreamConfig, &connCallbacks,
+                                &videoCallbacks, &audioCallbacks,
                                 NULL, 0, NULL, 0);
     if (err != 0) {
         // We already displayed an error dialog in the stage failure
@@ -1719,7 +1766,9 @@ bool Session::startConnectionAsync()
         return false;
     }
 
-    emit connectionStarted();
+    if (!recoveryAttempt) {
+        emit connectionStarted();
+    }
     return true;
 }
 
@@ -1850,7 +1899,7 @@ void Session::interrupt()
 void Session::exec()
 {
     // If the connection failed, clean up and abort the connection.
-    if (!m_AsyncConnectionSuccess) {
+    if (!m_AsyncConnectionSuccess.load()) {
         delete m_InputHandler;
         m_InputHandler = nullptr;
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
@@ -2030,10 +2079,17 @@ void Session::exec()
     // Switch to async logging mode when we enter the SDL loop
     StreamUtils::enterAsyncLoggingMode();
 
+    m_RecoveryPolicy.markStreaming();
+    m_EventLoopRunning.store(true);
+
     // Hijack this thread to be the SDL main thread. We have to do this
     // because we want to suspend all Qt processing until the stream is over.
     SDL_Event event;
     for (;;) {
+        if (!processRecoveryEvents()) {
+            goto DispatchDeferredCleanup;
+        }
+
 #if SDL_VERSION_ATLEAST(2, 0, 18) && !defined(STEAM_LINK)
         // SDL 2.0.18 has a proper wait event implementation that uses platform
         // support to block on events rather than polling on Windows, macOS, X11,
@@ -2044,7 +2100,7 @@ void Session::exec()
         // NB: This behavior was introduced in SDL 2.0.16, but had a few critical
         // issues that could cause indefinite timeouts, delayed joystick detection,
         // and other problems.
-        if (!SDL_WaitEventTimeout(&event, 1000)) {
+        if (!SDL_WaitEventTimeout(&event, m_RecoveryMode.load() ? 25 : 1000)) {
             presence.runCallbacks();
             continue;
         }
@@ -2105,6 +2161,11 @@ void Session::exec()
             case SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS:
                 m_InputHandler->setAdaptiveTriggers((uint16_t)(uintptr_t)event.user.data1,
                                                     (DualSenseOutputReport *)event.user.data2);
+                break;
+            case SDL_CODE_CONNECTION_STATE_CHANGED:
+            case SDL_CODE_FRAME_PRESENTED:
+                // These events only wake the SDL thread. State is consumed at
+                // the top of the loop through atomic generation barriers.
                 break;
             default:
                 SDL_assert(false);
@@ -2311,6 +2372,18 @@ void Session::exec()
     }
 
 DispatchDeferredCleanup:
+    m_EventLoopRunning.store(false);
+    m_RecoveryPolicy.stop();
+
+    if (m_RecoveryThread != nullptr) {
+        LiInterruptConnection();
+        m_RecoveryThread->wait();
+        delete m_RecoveryThread;
+        m_RecoveryThread = nullptr;
+    }
+
+    m_RecoveryMode.store(false);
+
     // Switch back to synchronous logging mode
     StreamUtils::exitAsyncLoggingMode();
 

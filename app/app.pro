@@ -191,7 +191,10 @@ SOURCES += \
     streaming/input/keyboard.cpp \
     streaming/input/mouse.cpp \
     streaming/input/reltouch.cpp \
+    streaming/lifecycle/connectionstartthread.cpp \
     streaming/lifecycle/recoverypolicy.cpp \
+    streaming/lifecycle/recoverysettings.cpp \
+    streaming/lifecycle/sessionrecovery.cpp \
     streaming/session.cpp \
     streaming/audio/audio.cpp \
     streaming/audio/renderers/sdlaud.cpp \
@@ -229,7 +232,9 @@ HEADERS += \
     cli/startstream.h \
     settings/streamingpreferences.h \
     streaming/input/input.h \
+    streaming/lifecycle/connectionstartthread.h \
     streaming/lifecycle/recoverypolicy.h \
+    streaming/lifecycle/recoverysettings.h \
     streaming/session.h \
     streaming/audio/renderers/renderer.h \
     streaming/audio/renderers/sdl.h \

@@ -9,7 +9,13 @@
 #include "input/input.h"
 #include "video/decoder.h"
 #include "audio/renderers/renderer.h"
+#include "lifecycle/recoverypolicy.h"
+#include "lifecycle/recoverysettings.h"
 #include "video/overlaymanager.h"
+
+#include <atomic>
+
+class QThread;
 
 class SupportedVideoFormatList : public QList<int>
 {
@@ -146,7 +152,24 @@ signals:
 private:
     void exec();
 
-    bool startConnectionAsync();
+    bool startConnectionAsync(bool recoveryAttempt = false,
+                              bool fastResume = false);
+
+    bool shouldRecoverConnection(int errorCode) const;
+
+    void reportConnectionTermination(int errorCode);
+
+    void regenerateRemoteInputCredentials();
+
+    void stopConnectionForRecovery();
+
+    void startRecoveryAttempt();
+
+    bool processRecoveryEvents();
+
+    bool applyRecoveryAction(RecoveryPolicy::Action action);
+
+    void finishRecovery();
 
     bool validateLaunch(SDL_Window* testWindow);
 
@@ -251,6 +274,9 @@ private:
     static
     int drSubmitDecodeUnit(PDECODE_UNIT du);
 
+    static
+    void drFramePresented(void* context);
+
     StreamingPreferences* m_Preferences;
     bool m_IsFullScreen;
     SupportedVideoFormatList m_SupportedVideoFormats; // Sorted in order of descending priority
@@ -275,7 +301,17 @@ private:
     QStringList m_LaunchWarnings;
     bool m_ShouldExit;
 
-    bool m_AsyncConnectionSuccess;
+    RecoverySettings m_RecoverySettings;
+    RecoveryPolicy m_RecoveryPolicy;
+    QThread* m_RecoveryThread;
+    std::atomic_bool m_EventLoopRunning;
+    std::atomic_bool m_RecoveryMode;
+    std::atomic_bool m_ConnectionLossQueued;
+    std::atomic_bool m_FramePresentedQueued;
+    std::atomic_bool m_AttemptTerminated;
+    std::atomic_bool m_AsyncConnectionSuccess;
+    std::atomic_int m_LastConnectionError;
+    int m_RecoveryGamepadMask;
     int m_PortTestResults;
 
     int m_ActiveVideoFormat;
