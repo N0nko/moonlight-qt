@@ -54,7 +54,7 @@ SdlInputHandler::findStateForGamepad(SDL_JoystickID id)
 
 void SdlInputHandler::sendGamepadState(GamepadState* state)
 {
-    if (!isInputForwardingEnabled()) {
+    if (!isGamepadForwardingEnabled()) {
         return;
     }
 
@@ -205,7 +205,7 @@ void SdlInputHandler::raiseAllGamepadInputs()
 
 void SdlInputHandler::sendGamepadBatteryState(GamepadState* state, SDL_JoystickPowerLevel level)
 {
-    if (!isInputForwardingEnabled()) {
+    if (!isGamepadForwardingEnabled()) {
         return;
     }
 
@@ -253,7 +253,7 @@ Uint32 SdlInputHandler::mouseEmulationTimerCallback(Uint32 interval, void *param
     auto gamepad = reinterpret_cast<GamepadState*>(param);
 
     if (gamepad->owner == nullptr ||
-            !gamepad->owner->isInputForwardingEnabled()) {
+            !gamepad->owner->isGamepadForwardingEnabled()) {
         return 0;
     }
 
@@ -410,7 +410,7 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
         if (event->button == SDL_CONTROLLER_BUTTON_START) {
             state->lastStartDownTime = SDL_GetTicks();
         }
-        else if (isInputForwardingEnabled() && state->mouseEmulationTimer != 0) {
+        else if (isGamepadForwardingEnabled() && state->mouseEmulationTimer != 0) {
             if (event->button == SDL_CONTROLLER_BUTTON_A) {
                 LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
             }
@@ -453,7 +453,7 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
                                 "Mouse emulation deactivated");
                     Session::get()->notifyMouseEmulationMode(false);
                 }
-                else if (m_GamepadMouse && isInputForwardingEnabled()) {
+                else if (m_GamepadMouse && isGamepadForwardingEnabled()) {
                     // Send the start button up event to the host, since we won't do it below
                     sendGamepadState(state);
 
@@ -465,7 +465,7 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
                 }
             }
         }
-        else if (isInputForwardingEnabled() && state->mouseEmulationTimer != 0) {
+        else if (isGamepadForwardingEnabled() && state->mouseEmulationTimer != 0) {
             if (event->button == SDL_CONTROLLER_BUTTON_A) {
                 LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
             }
@@ -496,7 +496,7 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
         SDL_PushEvent(&event);
 
         // Clear buttons down on this gamepad
-        if (isInputForwardingEnabled()) {
+        if (isGamepadForwardingEnabled()) {
             LiSendMultiControllerEvent(state->index, m_GamepadMask,
                                        0, 0, 0, 0, 0, 0, 0);
         }
@@ -513,7 +513,7 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
                                                             !Session::get()->getOverlayManager().isOverlayEnabled(Overlay::OverlayDebug));
 
         // Clear buttons down on this gamepad
-        if (isInputForwardingEnabled()) {
+        if (isGamepadForwardingEnabled()) {
             LiSendMultiControllerEvent(state->index, m_GamepadMask,
                                        0, 0, 0, 0, 0, 0, 0);
         }
@@ -530,7 +530,7 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
 
 void SdlInputHandler::handleControllerSensorEvent(SDL_ControllerSensorEvent* event)
 {
-    if (!isInputForwardingEnabled()) {
+    if (!isGamepadForwardingEnabled()) {
         return;
     }
 
@@ -569,7 +569,7 @@ void SdlInputHandler::handleControllerSensorEvent(SDL_ControllerSensorEvent* eve
 
 void SdlInputHandler::handleControllerTouchpadEvent(SDL_ControllerTouchpadEvent* event)
 {
-    if (!isInputForwardingEnabled()) {
+    if (!isGamepadForwardingEnabled()) {
         return;
     }
 
@@ -872,7 +872,7 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
 #endif
             type == LI_CTYPE_PS;
 
-        if (isInputForwardingEnabled()) {
+        if (isGamepadForwardingEnabled()) {
             LiSendControllerArrivalEvent(state->index, m_GamepadMask, type, supportedButtonFlags, capabilities);
         }
 #else
@@ -916,7 +916,7 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
                         state->index);
 
             // Send a final event to let the PC know this gamepad is gone
-            if (isInputForwardingEnabled()) {
+            if (isGamepadForwardingEnabled()) {
                 LiSendMultiControllerEvent(state->index, m_GamepadMask,
                                            0, 0, 0, 0, 0, 0, 0);
             }

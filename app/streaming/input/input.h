@@ -193,6 +193,8 @@ private:
 
     void releaseHostInput(bool releaseGamepads);
 
+    bool isGamepadForwardingEnabled() const;
+
     void handleAbsoluteFingerEvent(SDL_TouchFingerEvent* event);
 
     void emulateAbsoluteFingerEvent(SDL_TouchFingerEvent* event);
@@ -225,7 +227,9 @@ private:
     bool m_SwapMouseButtons;
     bool m_ReverseScrollDirection;
     bool m_SwapFaceButtons;
-    std::atomic_bool m_InputForwardingEnabled;
+    // Recovery and Gamescope focus must independently gate remote input.
+    std::atomic_bool m_TransportForwardingEnabled;
+    std::atomic_bool m_StreamInputFocused;
 
     bool m_NeedsManualCaptureOnLeave;
     bool m_MouseWasInVideoRegion;
