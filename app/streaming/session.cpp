@@ -34,7 +34,6 @@
 #define SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS 105
 #define SDL_CODE_CONNECTION_STATE_CHANGED 106
 #define SDL_CODE_FRAME_PRESENTED 107
-#define SDL_CODE_INITIALIZE_DECODER 110
 #define SDL_CODE_DECK_MICROPHONE_RETRY 111
 
 #include <QtEndian>
@@ -2405,16 +2404,6 @@ void Session::exec()
         focusStreamWindow();
     }
 
-    // Queue decoder creation explicitly because Gamescope may omit the SDL
-    // window-shown event when another same-process window remains mapped.
-    SDL_Event initialDecoderEvent = {};
-    initialDecoderEvent.type = SDL_USEREVENT;
-    initialDecoderEvent.user.code = SDL_CODE_INITIALIZE_DECODER;
-    if (SDL_PushEvent(&initialDecoderEvent) != 1) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Unable to queue initial decoder creation");
-    }
-
     // Keep the SDL stream loop authoritative while servicing Qt only when the
     // secondary settings window actually has focus.
     SDL_Event event = {};
@@ -2437,6 +2426,17 @@ void Session::exec()
     if (!inputWasFocused) {
         m_InputHandler->notifyFocusLost();
         pumpQtEvents();
+    }
+
+    // Build the renderer before entering the event loop so incoming video
+    // cannot outrun decoder creation behind Gamescope's queued window events.
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Creating initial video decoder synchronously");
+    if (!recreateVideoDecoder(true)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "Failed to create the initial video decoder");
+        emit displayLaunchError(tr("Unable to initialize video decoder. Please check your streaming settings and try again."));
+        goto DispatchDeferredCleanup;
     }
 
     for (;;) {
@@ -2557,14 +2557,6 @@ void Session::exec()
             case SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS:
                 m_InputHandler->setAdaptiveTriggers((uint16_t)(uintptr_t)event.user.data1,
                                                     (DualSenseOutputReport *)event.user.data2);
-                break;
-            case SDL_CODE_INITIALIZE_DECODER:
-                if (m_VideoDecoder == nullptr && !recreateVideoDecoder(true)) {
-                    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                                 "Failed to create the initial video decoder");
-                    emit displayLaunchError(tr("Unable to initialize video decoder. Please check your streaming settings and try again."));
-                    goto DispatchDeferredCleanup;
-                }
                 break;
             case SDL_CODE_DECK_MICROPHONE_RETRY:
                 if (event.user.data1 == this) {
