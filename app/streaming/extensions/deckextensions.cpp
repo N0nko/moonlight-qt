@@ -145,7 +145,7 @@ void Session::markIntentionalDisconnect()
 bool Session::setDeckMicrophoneEnabled(bool enabled)
 {
     if (!enabled) {
-        m_DeckMicrophone.stop();
+        stopDeckMicrophone();
         return true;
     }
 
@@ -156,11 +156,7 @@ bool Session::setDeckMicrophoneEnabled(bool enabled)
         return true;
     }
 
-    if (!m_DeckMicrophone.start()) {
-        return false;
-    }
-    m_DeckMicrophone.setConnected(true);
-    return true;
+    return startDeckMicrophone();
 }
 
 void Session::processExtensionMessages()

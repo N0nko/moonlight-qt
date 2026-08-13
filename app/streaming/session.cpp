@@ -35,6 +35,7 @@
 #define SDL_CODE_CONNECTION_STATE_CHANGED 106
 #define SDL_CODE_FRAME_PRESENTED 107
 #define SDL_CODE_INITIALIZE_DECODER 110
+#define SDL_CODE_DECK_MICROPHONE_RETRY 111
 
 #include <QtEndian>
 #include <QCoreApplication>
@@ -54,6 +55,10 @@
 #endif
 
 namespace {
+constexpr int DeckMicrophoneRetryLimit = 20;
+constexpr Uint32 DeckMicrophoneRetryBaseMs = 250;
+constexpr Uint32 DeckMicrophoneRetryMaxMs = 2000;
+
 QByteArray gamescopeControlDisplay()
 {
     const QByteArray configured = qgetenv("MOONLIGHT_GAMESCOPE_CONTROL_DISPLAY");
@@ -776,7 +781,9 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_OpusDecoder(nullptr),
       m_AudioRenderer(nullptr),
       m_AudioSampleCount(0),
-      m_DropAudioEndTime(0)
+      m_DropAudioEndTime(0),
+      m_DeckMicrophoneRetryTimer(0),
+      m_DeckMicrophoneRetryAttempt(0)
 {
 }
 
@@ -2097,6 +2104,73 @@ void Session::setShouldExit(bool quitHostApp)
     m_ShouldExit = true;
 }
 
+Uint32 Session::deckMicrophoneRetryTimer(Uint32 interval, void* context)
+{
+    SDL_Event event = {};
+    event.type = SDL_USEREVENT;
+    event.user.code = SDL_CODE_DECK_MICROPHONE_RETRY;
+    event.user.data1 = context;
+    if (SDL_PushEvent(&event) != 1) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO,
+                    "Unable to queue Deck microphone retry");
+        return interval;
+    }
+    return 0;
+}
+
+void Session::scheduleDeckMicrophoneRetry()
+{
+    if (m_DeckMicrophoneRetryTimer != 0 ||
+            m_DeckMicrophoneRetryAttempt >= DeckMicrophoneRetryLimit ||
+            !m_EventLoopRunning.load() || m_RecoveryMode.load() ||
+            !m_Preferences->deckMicrophone) {
+        return;
+    }
+
+    ++m_DeckMicrophoneRetryAttempt;
+    const int shift = m_DeckMicrophoneRetryAttempt < 4 ?
+                m_DeckMicrophoneRetryAttempt - 1 : 3;
+    const Uint32 delay = DeckMicrophoneRetryBaseMs << shift;
+    m_DeckMicrophoneRetryTimer = SDL_AddTimer(
+                delay < DeckMicrophoneRetryMaxMs ? delay : DeckMicrophoneRetryMaxMs,
+                deckMicrophoneRetryTimer,
+                this);
+    if (m_DeckMicrophoneRetryTimer == 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO,
+                    "Unable to schedule Deck microphone retry: %s",
+                    SDL_GetError());
+    }
+}
+
+bool Session::startDeckMicrophone()
+{
+    if (!m_Preferences->deckMicrophone || !m_EventLoopRunning.load() ||
+            m_RecoveryMode.load()) {
+        return false;
+    }
+    if (m_DeckMicrophone.isRunning()) {
+        return true;
+    }
+    if (!m_DeckMicrophone.start()) {
+        scheduleDeckMicrophoneRetry();
+        return m_DeckMicrophoneRetryTimer != 0;
+    }
+
+    m_DeckMicrophoneRetryAttempt = 0;
+    m_DeckMicrophone.setConnected(true);
+    return true;
+}
+
+void Session::stopDeckMicrophone()
+{
+    if (m_DeckMicrophoneRetryTimer != 0) {
+        SDL_RemoveTimer(m_DeckMicrophoneRetryTimer);
+        m_DeckMicrophoneRetryTimer = 0;
+    }
+    m_DeckMicrophoneRetryAttempt = 0;
+    m_DeckMicrophone.stop();
+}
+
 void Session::start()
 {
     // Wait for any old session to finish cleanup
@@ -2314,9 +2388,7 @@ void Session::exec()
     m_RecoveryPolicy.markStreaming();
     m_EventLoopRunning.store(true);
 
-    if (m_Preferences->deckMicrophone && m_DeckMicrophone.start()) {
-        m_DeckMicrophone.setConnected(true);
-    }
+    startDeckMicrophone();
 
 #ifdef HAVE_LINUX_LIFECYCLE
     m_LinuxLifecycleMonitor = new LinuxLifecycleMonitor(
@@ -2492,6 +2564,12 @@ void Session::exec()
                                  "Failed to create the initial video decoder");
                     emit displayLaunchError(tr("Unable to initialize video decoder. Please check your streaming settings and try again."));
                     goto DispatchDeferredCleanup;
+                }
+                break;
+            case SDL_CODE_DECK_MICROPHONE_RETRY:
+                if (event.user.data1 == this) {
+                    m_DeckMicrophoneRetryTimer = 0;
+                    startDeckMicrophone();
                 }
                 break;
             case SDL_CODE_CONNECTION_STATE_CHANGED:
@@ -2716,7 +2794,7 @@ void Session::exec()
     }
 
 DispatchDeferredCleanup:
-    m_DeckMicrophone.stop();
+    stopDeckMicrophone();
     if (!m_UnexpectedTermination && !m_RecoveryMode.load()) {
         markIntentionalDisconnect();
     }

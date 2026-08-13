@@ -204,6 +204,14 @@ private:
 
     void markIntentionalDisconnect();
 
+    bool startDeckMicrophone();
+
+    void stopDeckMicrophone();
+
+    void scheduleDeckMicrophoneRetry();
+
+    static Uint32 deckMicrophoneRetryTimer(Uint32 interval, void* context);
+
 #ifdef HAVE_LINUX_LIFECYCLE
     void queueLifecycleSleepState(bool sleeping);
 
@@ -395,6 +403,8 @@ private:
     int m_AudioSampleCount;
     Uint32 m_DropAudioEndTime;
 
+    SDL_TimerID m_DeckMicrophoneRetryTimer;
+    int m_DeckMicrophoneRetryAttempt;
     DeckMicrophone m_DeckMicrophone;
 
     Overlay::OverlayManager m_OverlayManager;
