@@ -58,6 +58,7 @@ constexpr int DeckMicrophoneRetryLimit = 20;
 constexpr Uint32 DeckMicrophoneRetryBaseMs = 250;
 constexpr Uint32 DeckMicrophoneRetryMaxMs = 2000;
 constexpr Uint32 GamescopeFocusPollIntervalMs = 16;
+constexpr Uint32 GamescopeFocusRefreshIntervalMs = 250;
 
 QByteArray gamescopeControlDisplay()
 {
@@ -78,7 +79,8 @@ public:
           m_NativeWindow(0),
           m_FocusedWindowAtom(0),
           m_FocusedWindow(0),
-          m_LastPollTicks(0)
+          m_LastPollTicks(0),
+          m_LastRefreshTicks(0)
 #endif
     {
 #ifdef HAS_X11
@@ -169,13 +171,23 @@ private:
         }
         m_LastPollTicks = now;
 
+        bool focusEventReceived = false;
         while (XPending(m_Display) > 0) {
             XEvent event = {};
             XNextEvent(m_Display, &event);
             if (event.type == PropertyNotify &&
                     event.xproperty.atom == m_FocusedWindowAtom) {
                 refresh();
+                focusEventReceived = true;
             }
+        }
+
+        // Gamescope can change focus while the client is frozen for S4
+        // without leaving a usable X event behind. A low-rate read heals that
+        // stale cache without returning to per-controller-event X11 traffic.
+        if (!focusEventReceived &&
+                now - m_LastRefreshTicks >= GamescopeFocusRefreshIntervalMs) {
+            refresh();
         }
     }
 
@@ -214,6 +226,7 @@ private:
         if (data != nullptr) {
             XFree(data);
         }
+        m_LastRefreshTicks = SDL_GetTicks();
     }
 #endif
 
@@ -227,6 +240,7 @@ private:
     Atom m_FocusedWindowAtom;
     Window m_FocusedWindow;
     Uint32 m_LastPollTicks;
+    Uint32 m_LastRefreshTicks;
 #endif
 };
 }
@@ -797,6 +811,8 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_LifecycleSleepQueued(false),
       m_LifecycleWakeQueued(false),
       m_LifecycleSuspended(false),
+      m_StreamWindowFocused(false),
+      m_LifecycleFocusRestorePending(false),
       m_NetworkStateQueued(false),
       m_NetworkAvailable(true),
       m_NetworkUnavailable(false),
@@ -2446,6 +2462,9 @@ void Session::exec()
     SDL_Event event = {};
     GamescopeFocusTracker focusTracker(m_Window);
     bool inputWasFocused = focusTracker.isFocused();
+#ifdef HAVE_LINUX_LIFECYCLE
+    m_StreamWindowFocused = inputWasFocused;
+#endif
 #ifdef HAS_X11
     const unsigned long settingsWindowId =
             liveSettingsSupported && m_QtWindow != nullptr ?
@@ -2539,6 +2558,7 @@ void Session::exec()
         bool inputFocused = focusTracker.isFocused();
 #ifdef HAVE_LINUX_LIFECYCLE
         inputFocused = inputFocused && !m_LifecycleSuspended.load();
+        m_StreamWindowFocused = inputFocused;
 #endif
         if (inputFocused != inputWasFocused) {
             m_AudioMuted = m_Preferences->muteOnFocusLoss && !inputFocused;

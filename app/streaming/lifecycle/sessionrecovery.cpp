@@ -160,6 +160,15 @@ void Session::finishRecovery()
     }
 
     m_InputHandler->updatePointerRegionLock();
+
+#ifdef HAVE_LINUX_LIFECYCLE
+    if (m_LifecycleFocusRestorePending) {
+        m_LifecycleFocusRestorePending = false;
+        focusStreamWindow();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Restored stream focus after lifecycle recovery");
+    }
+#endif
 }
 
 #ifdef HAVE_LINUX_LIFECYCLE
@@ -230,6 +239,7 @@ bool Session::processLifecycleState()
 {
     if (m_LifecycleSleepQueued.exchange(false)) {
         if (!m_LifecycleSuspended.exchange(true)) {
+            m_LifecycleFocusRestorePending = m_StreamWindowFocused;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Quiescing the stream before system sleep");
             if (!m_NetworkUnavailable.load()) {

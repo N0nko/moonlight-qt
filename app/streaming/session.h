@@ -366,6 +366,8 @@ private:
     std::atomic_bool m_LifecycleSleepQueued;
     std::atomic_bool m_LifecycleWakeQueued;
     std::atomic_bool m_LifecycleSuspended;
+    bool m_StreamWindowFocused;
+    bool m_LifecycleFocusRestorePending;
     std::atomic_bool m_NetworkStateQueued;
     std::atomic_bool m_NetworkAvailable;
     std::atomic_bool m_NetworkUnavailable;
