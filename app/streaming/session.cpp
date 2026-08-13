@@ -57,6 +57,7 @@ namespace {
 constexpr int DeckMicrophoneRetryLimit = 20;
 constexpr Uint32 DeckMicrophoneRetryBaseMs = 250;
 constexpr Uint32 DeckMicrophoneRetryMaxMs = 2000;
+constexpr Uint32 GamescopeFocusPollIntervalMs = 16;
 
 QByteArray gamescopeControlDisplay()
 {
@@ -75,7 +76,9 @@ public:
         , m_Display(nullptr),
           m_RootWindow(0),
           m_NativeWindow(0),
-          m_FocusedWindowAtom(0)
+          m_FocusedWindowAtom(0),
+          m_FocusedWindow(0),
+          m_LastPollTicks(0)
 #endif
     {
 #ifdef HAS_X11
@@ -104,6 +107,7 @@ public:
         m_RootWindow = DefaultRootWindow(m_Display);
         XSelectInput(m_Display, m_RootWindow, PropertyChangeMask);
         refresh();
+        m_LastPollTicks = SDL_GetTicks();
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Gamescope focus gate active for native window %lu on %s",
                     static_cast<unsigned long>(m_NativeWindow),
@@ -130,6 +134,41 @@ public:
             return sdlFocused;
         }
 
+        pollFocusEvents();
+
+        return m_HaveCachedFocus ? m_CachedFocus : sdlFocused;
+#else
+        return sdlFocused;
+#endif
+    }
+
+    bool isNativeWindowFocused(unsigned long nativeWindow)
+    {
+#ifdef HAS_X11
+        if (m_Display == nullptr || nativeWindow == 0) {
+            return false;
+        }
+
+        pollFocusEvents();
+        return m_HaveCachedFocus &&
+               m_FocusedWindow == static_cast<Window>(nativeWindow);
+#else
+        Q_UNUSED(nativeWindow);
+        return false;
+#endif
+    }
+
+private:
+#ifdef HAS_X11
+    void pollFocusEvents()
+    {
+        const Uint32 now = SDL_GetTicks();
+        if (m_HaveCachedFocus &&
+                now - m_LastPollTicks < GamescopeFocusPollIntervalMs) {
+            return;
+        }
+        m_LastPollTicks = now;
+
         while (XPending(m_Display) > 0) {
             XEvent event = {};
             XNextEvent(m_Display, &event);
@@ -138,15 +177,8 @@ public:
                 refresh();
             }
         }
-
-        return m_HaveCachedFocus ? m_CachedFocus : sdlFocused;
-#else
-        return sdlFocused;
-#endif
     }
 
-private:
-#ifdef HAS_X11
     void refresh()
     {
         Atom actualType = 0;
@@ -169,10 +201,12 @@ private:
                     &data);
 
         m_HaveCachedFocus = false;
+        m_FocusedWindow = 0;
         if (status == Success && actualType == XA_CARDINAL &&
                 actualFormat == 32 && itemCount == 1 && data != nullptr) {
             const auto focusedWindow =
                     static_cast<Window>(*reinterpret_cast<unsigned long*>(data));
+            m_FocusedWindow = focusedWindow;
             m_CachedFocus = focusedWindow == m_NativeWindow;
             m_HaveCachedFocus = true;
         }
@@ -191,6 +225,8 @@ private:
     Window m_RootWindow;
     Window m_NativeWindow;
     Atom m_FocusedWindowAtom;
+    Window m_FocusedWindow;
+    Uint32 m_LastPollTicks;
 #endif
 };
 }
@@ -2400,7 +2436,8 @@ void Session::exec()
     m_LinuxLifecycleMonitor->start();
 #endif
 
-    if (supportsLiveSettingsWindow()) {
+    const bool liveSettingsSupported = supportsLiveSettingsWindow();
+    if (liveSettingsSupported) {
         focusStreamWindow();
     }
 
@@ -2409,7 +2446,15 @@ void Session::exec()
     SDL_Event event = {};
     GamescopeFocusTracker focusTracker(m_Window);
     bool inputWasFocused = focusTracker.isFocused();
-    bool qtWindowActive = false;
+#ifdef HAS_X11
+    const unsigned long settingsWindowId =
+            liveSettingsSupported && m_QtWindow != nullptr ?
+                static_cast<unsigned long>(m_QtWindow->winId()) : 0;
+#else
+    const unsigned long settingsWindowId = 0;
+#endif
+    bool qtWindowActive =
+            focusTracker.isNativeWindowFocused(settingsWindowId);
     Uint32 lastQtPump = 0;
     auto pumpQtEvents = [&]() {
         if (m_QtWindow == nullptr || !m_QtWindow->isVisible()) {
@@ -2420,7 +2465,8 @@ void Session::exec()
         QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
         QCoreApplication::sendPostedEvents();
         lastQtPump = SDL_GetTicks();
-        qtWindowActive = m_QtWindow->isActive();
+        qtWindowActive =
+                focusTracker.isNativeWindowFocused(settingsWindowId);
     };
 
     if (!inputWasFocused) {
@@ -2506,9 +2552,14 @@ void Session::exec()
             inputWasFocused = inputFocused;
         }
 
-        if (!qtWindowActive && m_QtWindow != nullptr &&
-                m_QtWindow->isVisible() && m_QtWindow->isActive()) {
+        const bool settingsWindowFocused =
+                focusTracker.isNativeWindowFocused(settingsWindowId);
+        if (inputFocused) {
+            qtWindowActive = false;
+        }
+        else if (!qtWindowActive && settingsWindowFocused) {
             qtWindowActive = true;
+            pumpQtEvents();
         }
 
         if (!haveEvent) {
