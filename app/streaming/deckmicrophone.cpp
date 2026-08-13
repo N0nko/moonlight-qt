@@ -171,6 +171,11 @@ void DeckMicrophone::stop()
     }
 }
 
+bool DeckMicrophone::isRunning() const
+{
+    return m_Running.load(std::memory_order_acquire);
+}
+
 void DeckMicrophone::setConnected(bool connected)
 {
     if (!connected) {

@@ -21,6 +21,7 @@ public:
 
     bool start();
     void stop();
+    bool isRunning() const;
     void setConnected(bool connected);
     bool handleStatus(std::uint32_t requestId,
                       DeckProtocol::MicrophoneStatus status);

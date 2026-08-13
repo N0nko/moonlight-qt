@@ -107,7 +107,7 @@ void Session::stopConnectionForRecovery()
 
     // Close capture before common-c destroys the playback renderer. Both
     // devices share SDL's process-global audio subsystem.
-    m_DeckMicrophone.stop();
+    stopDeckMicrophone();
 
     // Pull-based renderers must be gone before common-c tears down its queues.
     destroyVideoDecoder();
@@ -149,9 +149,7 @@ void Session::finishRecovery()
     m_ConnectionLossQueued.store(false);
     m_PortTestResults = 0;
 
-    if (m_Preferences->deckMicrophone && m_DeckMicrophone.start()) {
-        m_DeckMicrophone.setConnected(true);
-    }
+    startDeckMicrophone();
 
     if (m_MouseEmulationRefCount > 0) {
         m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
