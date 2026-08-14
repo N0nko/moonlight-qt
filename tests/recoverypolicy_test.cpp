@@ -1,5 +1,6 @@
 #include "../app/streaming/lifecycle/recoverypolicy.h"
 #include "../app/streaming/lifecycle/recoverysettings.h"
+#include "../app/streaming/lifecycle/networkcontinuitypolicy.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -130,6 +131,21 @@ void suspendsWithoutRetrying()
     CHECK(policy.lastError() == -1);
 }
 
+void retainsTransportAcrossBriefNetworkLoss()
+{
+    bool unavailable = false;
+    CHECK(networkContinuityAction(false, unavailable) ==
+          NetworkContinuityAction::RetainTransport);
+    unavailable = true;
+    CHECK(networkContinuityAction(false, unavailable) ==
+          NetworkContinuityAction::None);
+    CHECK(networkContinuityAction(true, unavailable) ==
+          NetworkContinuityAction::ReleaseRecoveryGate);
+    unavailable = false;
+    CHECK(networkContinuityAction(true, unavailable) ==
+          NetworkContinuityAction::None);
+}
+
 void readsBoundedCompatibilitySettings()
 {
     ScopedEnvironment window("MOONLIGHT_RECONNECT_WINDOW_MS", "1200");
@@ -154,6 +170,7 @@ int main()
     stopsAtRecoveryDeadline();
     survivesTickWraparound();
     suspendsWithoutRetrying();
+    retainsTransportAcrossBriefNetworkLoss();
     readsBoundedCompatibilitySettings();
     return EXIT_SUCCESS;
 }

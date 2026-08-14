@@ -1,6 +1,7 @@
 #include "streaming/session.h"
 
 #include "connectionstartthread.h"
+#include "networkcontinuitypolicy.h"
 #ifdef HAVE_LINUX_LIFECYCLE
 #include "linuxlifecyclemonitor.h"
 #endif
@@ -242,9 +243,7 @@ bool Session::processLifecycleState()
             m_LifecycleFocusRestorePending = m_StreamWindowFocused;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Quiescing the stream before system sleep");
-            if (!m_NetworkUnavailable.load()) {
-                suspendConnectionForLifecycle();
-            }
+            suspendConnectionForLifecycle();
         }
 
         if (m_LinuxLifecycleMonitor != nullptr) {
@@ -254,38 +253,33 @@ bool Session::processLifecycleState()
 
     if (m_NetworkStateQueued.exchange(false)) {
         const bool available = m_NetworkAvailable.load();
-        if (!available) {
-            if (!m_NetworkUnavailable.exchange(true) &&
-                    !m_LifecycleSuspended.load()) {
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "Network unavailable; pausing stream recovery");
-                suspendConnectionForLifecycle();
-                m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
-                                                   "Waiting for network...");
-                m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
-            }
-        }
-        else if (m_NetworkUnavailable.exchange(false) &&
-                 !m_LifecycleSuspended.load()) {
+        switch (networkContinuityAction(available, m_NetworkUnavailable.load())) {
+        case NetworkContinuityAction::RetainTransport:
+            m_NetworkUnavailable.store(true);
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Network available; resuming in the existing stream window");
-            if (!resumeConnectionForLifecycle()) {
-                return false;
-            }
+                        "Network unavailable; retaining stream transport");
+            break;
+        case NetworkContinuityAction::ReleaseRecoveryGate:
+            m_NetworkUnavailable.store(false);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Network available; releasing stream recovery gate");
+            break;
+        case NetworkContinuityAction::None:
+            break;
         }
     }
 
-    if (m_LifecycleWakeQueued.exchange(false)) {
-        if (m_LifecycleSuspended.exchange(false)) {
+    if (m_LifecycleWakeQueued.load()) {
+        if (m_NetworkUnavailable.load()) {
+            m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
+                                               "Waiting for network...");
+            m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
+        }
+        else if (m_LifecycleWakeQueued.exchange(false) &&
+                 m_LifecycleSuspended.exchange(false)) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "System wake received in the existing stream window");
-
-            if (m_NetworkUnavailable.load()) {
-                m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
-                                                   "Waiting for network...");
-                m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
-            }
-            else if (!resumeConnectionForLifecycle()) {
+            if (!resumeConnectionForLifecycle()) {
                 return false;
             }
         }
