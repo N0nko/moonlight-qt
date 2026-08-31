@@ -773,7 +773,7 @@ Flickable {
 
                     Connections {
                         target: StreamingPreferences
-                        onBitrateChanged: slider.syncFromBitrate()
+                        function onBitrateChanged() { slider.syncFromBitrate() }
                     }
                 }
 
