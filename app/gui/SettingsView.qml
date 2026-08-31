@@ -327,7 +327,7 @@ Flickable {
                                                                                                               StreamingPreferences.height,
                                                                                                               StreamingPreferences.fps,
                                                                                                               StreamingPreferences.enableYUV444);
-                                    slider.value = StreamingPreferences.bitrateKbps
+                                    slider.syncFromBitrate()
                                 }
                             }
 
@@ -495,7 +495,7 @@ Flickable {
                                                                                                               StreamingPreferences.height,
                                                                                                               StreamingPreferences.fps,
                                                                                                               StreamingPreferences.enableYUV444);
-                                    slider.value = StreamingPreferences.bitrateKbps
+                                    slider.syncFromBitrate()
                                 }
                             }
 
@@ -723,48 +723,76 @@ Flickable {
                     wrapMode: Text.Wrap
                 }
 
-                Row {
+                Slider {
+                    id: slider
                     width: parent.width
-                    spacing: 5
+                    from: 0.0
+                    to: 1.0
+                    stepSize: 0.001
 
-                    Slider {
-                        id: slider
+                    readonly property int minimumBitrateKbps: 500
+                    readonly property int maximumBitrateKbps: StreamingPreferences.unlockBitrate ? 500000 : 150000
+                    readonly property real curveExponent: 2.2
 
-                        value: StreamingPreferences.bitrateKbps
+                    value: 0.0
 
-                        stepSize: 500
-                        from : 500
-                        to: StreamingPreferences.unlockBitrate ? 500000 : 150000
-
-                        snapMode: "SnapOnRelease"
-                        width: Math.min(bitrateDesc.implicitWidth, parent.width - (resetBitrateButton.visible ? resetBitrateButton.width + parent.spacing : 0))
-
-                        onValueChanged: {
-                            bitrateTitle.text = qsTr("Video bitrate: %1 Mbps").arg(value / 1000.0)
-                            StreamingPreferences.bitrateKbps = value
-                        }
-
-                        onMoved: {
-                            StreamingPreferences.autoAdjustBitrate = false
-                            liveBitrateTimer.restart()
-                        }
-
-                        Component.onCompleted: {
-                            // Refresh the text after translations change
-                            languageChanged.connect(valueChanged)
-                        }
+                    function bitrateToPosition(bitrateKbps) {
+                        var clamped = Math.min(maximumBitrateKbps, Math.max(minimumBitrateKbps, bitrateKbps))
+                        var normalized = (clamped - minimumBitrateKbps) / (maximumBitrateKbps - minimumBitrateKbps)
+                        return Math.pow(normalized, 1.0 / curveExponent)
                     }
 
-                    Button {
-                        id: resetBitrateButton
-                        text: qsTr("Use Default (%1 Mbps)").arg(StreamingPreferences.getDefaultBitrate(StreamingPreferences.width, StreamingPreferences.height, StreamingPreferences.fps, StreamingPreferences.enableYUV444) / 1000.0)
-                        visible: StreamingPreferences.bitrateKbps !== StreamingPreferences.getDefaultBitrate(StreamingPreferences.width, StreamingPreferences.height, StreamingPreferences.fps, StreamingPreferences.enableYUV444)
-                        onClicked: {
-                            var defaultBitrate = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width, StreamingPreferences.height, StreamingPreferences.fps, StreamingPreferences.enableYUV444)
-                            StreamingPreferences.bitrateKbps = defaultBitrate
-                            StreamingPreferences.autoAdjustBitrate = false
-                            slider.value = defaultBitrate
-                            liveBitrateTimer.restart()
+                    function bitrateFromPosition(sliderPosition) {
+                        var normalized = Math.min(1.0, Math.max(0.0, sliderPosition))
+                        var bitrate = minimumBitrateKbps +
+                                (maximumBitrateKbps - minimumBitrateKbps) * Math.pow(normalized, curveExponent)
+                        return Math.round(bitrate / 500) * 500
+                    }
+
+                    function syncFromBitrate() {
+                        value = bitrateToPosition(StreamingPreferences.bitrateKbps)
+                        bitrateTitle.text = qsTr("Video bitrate: %1 Mbps").arg(StreamingPreferences.bitrateKbps / 1000.0)
+                    }
+
+                    function setBitrate(bitrateKbps) {
+                        var clamped = Math.min(maximumBitrateKbps, Math.max(minimumBitrateKbps, bitrateKbps))
+                        var rounded = Math.round(clamped / 500) * 500
+                        StreamingPreferences.autoAdjustBitrate = false
+                        StreamingPreferences.bitrateKbps = rounded
+                        value = bitrateToPosition(rounded)
+                        bitrateTitle.text = qsTr("Video bitrate: %1 Mbps").arg(rounded / 1000.0)
+                        liveBitrateTimer.restart()
+                    }
+
+                    onMoved: setBitrate(bitrateFromPosition(value))
+
+                    Component.onCompleted: {
+                        syncFromBitrate()
+                        languageChanged.connect(syncFromBitrate)
+                    }
+
+                    Connections {
+                        target: StreamingPreferences
+                        onBitrateChanged: slider.syncFromBitrate()
+                    }
+                }
+
+                RowLayout {
+                    width: parent.width
+                    spacing: 6
+
+                    Repeater {
+                        model: [20, 40, 80, 200]
+
+                        Button {
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                            Layout.preferredWidth: 1
+                            text: qsTr("%1 Mbps").arg(modelData)
+                            enabled: modelData * 1000 <= slider.maximumBitrateKbps
+                            flat: StreamingPreferences.bitrateKbps !== modelData * 1000
+                            font.bold: StreamingPreferences.bitrateKbps === modelData * 1000
+                            onClicked: slider.setBitrate(modelData * 1000)
                         }
                     }
                 }
@@ -1873,7 +1901,7 @@ Flickable {
                                                                                                           StreamingPreferences.height,
                                                                                                           StreamingPreferences.fps,
                                                                                                           StreamingPreferences.enableYUV444);
-                                slider.value = StreamingPreferences.bitrateKbps
+                                slider.syncFromBitrate()
                             }
                         }
                     }
@@ -1896,8 +1924,8 @@ Flickable {
                     checked: StreamingPreferences.unlockBitrate
                     onCheckedChanged: {
                         StreamingPreferences.unlockBitrate = checked
-                        StreamingPreferences.bitrateKbps = Math.min(StreamingPreferences.bitrateKbps, slider.to)
-                        slider.value = StreamingPreferences.bitrateKbps
+                        StreamingPreferences.bitrateKbps = Math.min(StreamingPreferences.bitrateKbps, slider.maximumBitrateKbps)
+                        slider.syncFromBitrate()
                     }
 
                     ToolTip.delay: 1000
