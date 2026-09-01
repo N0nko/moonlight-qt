@@ -930,12 +930,11 @@ bool Session::initialize(QQuickWindow* qtWindow)
 
     m_StreamConfig.fps = m_Preferences->fps;
     m_StreamConfig.bitrate = m_Preferences->bitrateKbps;
-    QScreen* clientScreen = qtWindow->screen();
-    m_StreamConfig.clientRefreshRateX100 = clientScreen != nullptr ?
-        qRound(clientScreen->refreshRate() * 100.0) : m_StreamConfig.fps * 100;
+    // Xwayland may report an approximate refresh rate; keep host capture exact.
+    m_StreamConfig.clientRefreshRateX100 = m_StreamConfig.fps * 100;
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "Client display refresh rate: %.2f Hz",
+                "Host capture target: %.2f FPS",
                 m_StreamConfig.clientRefreshRateX100 / 100.0);
 
 #ifndef STEAM_LINK
