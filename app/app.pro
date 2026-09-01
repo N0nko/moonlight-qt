@@ -151,11 +151,6 @@ unix:if(!macx|disable-prebuilts) {
             packagesExist(x11) {
                 DEFINES += HAS_X11
                 PKGCONFIG += x11
-
-                packagesExist(xrandr) {
-                    DEFINES += HAS_XRANDR
-                    PKGCONFIG += xrandr
-                }
             }
         }
     }
