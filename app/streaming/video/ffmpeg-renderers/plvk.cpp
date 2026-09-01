@@ -14,8 +14,14 @@ extern "C" {
 #include <libavutil/hwcontext_vulkan.h>
 }
 
-#include <vector>
+#include <algorithm>
+#include <array>
 #include <set>
+#include <vector>
+
+#ifdef Q_OS_LINUX
+#include <time.h>
+#endif
 
 #ifndef VK_KHR_video_decode_av1
 #define VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME "VK_KHR_video_decode_av1"
@@ -365,15 +371,37 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
     vkParams.surface = m_VkSurface;
     vkParams.device = device;
 
+    std::vector<const char*> optionalDeviceExtensions;
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(60, 26, 100)
+    const char** ffmpegOptionalExtensions = nullptr;
+#endif
+
     if (m_HwDeviceType == AV_HWDEVICE_TYPE_VULKAN) {
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(60, 26, 100)
-        vkParams.opt_extensions = av_vk_get_optional_device_extensions(&vkParams.num_opt_extensions);
+        int ffmpegOptionalExtensionCount = 0;
+        ffmpegOptionalExtensions = av_vk_get_optional_device_extensions(&ffmpegOptionalExtensionCount);
+        if (ffmpegOptionalExtensions != nullptr && ffmpegOptionalExtensionCount > 0) {
+            optionalDeviceExtensions.insert(optionalDeviceExtensions.end(),
+                                            ffmpegOptionalExtensions,
+                                            ffmpegOptionalExtensions + ffmpegOptionalExtensionCount);
+        }
 #else
-        vkParams.opt_extensions = k_OptionalDeviceExtensions;
-        vkParams.num_opt_extensions = SDL_arraysize(k_OptionalDeviceExtensions);
+        optionalDeviceExtensions.insert(optionalDeviceExtensions.end(),
+                                        k_OptionalDeviceExtensions,
+                                        k_OptionalDeviceExtensions +
+                                            SDL_arraysize(k_OptionalDeviceExtensions));
 #endif
         vkParams.extra_queues = VK_QUEUE_FLAG_BITS_MAX_ENUM;
     }
+
+#ifdef Q_OS_LINUX
+    if (m_PresentationSyncRequested) {
+        optionalDeviceExtensions.push_back(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
+    }
+#endif
+
+    vkParams.opt_extensions = optionalDeviceExtensions.data();
+    vkParams.num_opt_extensions = (int)optionalDeviceExtensions.size();
 
     {
         // Don't let Qt take DRM master from us during pl_vulkan_create()
@@ -383,7 +411,7 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
     }
 
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(60, 26, 100)
-    av_free((void*)vkParams.opt_extensions);
+    av_free(ffmpegOptionalExtensions);
 #endif
 
     if (m_Vulkan == nullptr) {
@@ -396,6 +424,46 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Vulkan rendering device chosen: %s",
                 deviceProps->deviceName);
+
+#ifdef Q_OS_LINUX
+    if (m_PresentationSyncRequested) {
+        bool displayTimingEnabled = false;
+        for (int i = 0; i < m_Vulkan->num_extensions; i++) {
+            if (strcmp(m_Vulkan->extensions[i], VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) == 0) {
+                displayTimingEnabled = true;
+                break;
+            }
+        }
+
+        if (displayTimingEnabled) {
+            fn_vkGetDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+                m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, "vkGetDeviceProcAddr"));
+            if (fn_vkGetDeviceProcAddr != nullptr) {
+                fn_vkGetRefreshCycleDurationGOOGLE =
+                    reinterpret_cast<PFN_vkGetRefreshCycleDurationGOOGLE>(
+                        fn_vkGetDeviceProcAddr(m_Vulkan->device,
+                                               "vkGetRefreshCycleDurationGOOGLE"));
+                fn_vkGetPastPresentationTimingGOOGLE =
+                    reinterpret_cast<PFN_vkGetPastPresentationTimingGOOGLE>(
+                        fn_vkGetDeviceProcAddr(m_Vulkan->device,
+                                               "vkGetPastPresentationTimingGOOGLE"));
+            }
+
+            m_DisplayTimingAvailable = fn_vkGetRefreshCycleDurationGOOGLE != nullptr &&
+                                       fn_vkGetPastPresentationTimingGOOGLE != nullptr;
+        }
+
+        if (m_DisplayTimingAvailable) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Gamescope presentation sync available (VK_GOOGLE_display_timing)");
+        }
+        else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Gamescope presentation sync unavailable; using FIFO fallback");
+        }
+    }
+#endif
+
     return true;
 }
 
@@ -427,6 +495,10 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
 {
     m_Window = params->window;
     m_MaxVideoFps = params->frameRate;
+
+#ifdef Q_OS_LINUX
+    m_PresentationSyncRequested = params->enableFramePacing;
+#endif
 
     unsigned int instanceExtensionCount = 0;
     if (!SDL_Vulkan_GetInstanceExtensions(params->window, &instanceExtensionCount, nullptr)) {
@@ -640,6 +712,12 @@ bool PlVkRenderer::createSwapchain(int depth)
     vkSwapchainParams.surface = m_VkSurface;
     vkSwapchainParams.present_mode = m_VkPresentMode;
     vkSwapchainParams.swapchain_depth = depth;
+#ifdef Q_OS_LINUX
+    if (m_DisplayTimingAvailable) {
+        vkSwapchainParams.present_hook = PlVkRenderer::presentHook;
+        vkSwapchainParams.present_hook_priv = this;
+    }
+#endif
 #if PL_API_VER >= 338
     vkSwapchainParams.disable_10bit_sdr = true; // Some drivers don't dither 10-bit SDR output correctly
 #endif
@@ -659,6 +737,194 @@ bool PlVkRenderer::createSwapchain(int depth)
     m_SwapchainDepth = depth;
     return true;
 }
+
+#ifdef Q_OS_LINUX
+void PlVkRenderer::presentHook(void* context, VkSwapchainKHR swapchain,
+                               VkPresentInfoKHR* presentInfo)
+{
+    static_cast<PlVkRenderer*>(context)->preparePresent(swapchain, presentInfo);
+}
+
+uint64_t PlVkRenderer::monotonicTimeNs()
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000000000ull + now.tv_nsec;
+}
+
+void PlVkRenderer::resetPresentationTiming(VkSwapchainKHR swapchain)
+{
+    m_TimingSwapchain = swapchain;
+    m_NextPresentId = 1;
+    m_LastFeedbackPresentId = 0;
+    m_PresentsWithoutFeedback = 0;
+    m_RefreshDurationNs = 0;
+    m_LastActualPresentTimeNs = 0;
+    m_TimingWindowStartNs = monotonicTimeNs();
+    m_TimingMissedVblanks = 0;
+    m_TimingLateFrames = 0;
+    m_MissingFeedbackLogged = false;
+    m_PresentationIntervalsNs.clear();
+    m_PresentationErrorsNs.clear();
+    m_PresentationIntervalsNs.reserve(std::max(m_MaxVideoFps * 6, 360));
+    m_PresentationErrorsNs.reserve(std::max(m_MaxVideoFps * 6, 360));
+
+    VkRefreshCycleDurationGOOGLE cycle = {};
+    if (fn_vkGetRefreshCycleDurationGOOGLE(m_Vulkan->device, swapchain, &cycle) == VK_SUCCESS &&
+        cycle.refreshDuration != 0) {
+        m_RefreshDurationNs = cycle.refreshDuration;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Gamescope presentation clock: %.3f Hz (%.3f ms)",
+                    1000000000.0 / m_RefreshDurationNs,
+                    m_RefreshDurationNs / 1000000.0);
+    }
+}
+
+void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
+{
+    std::array<VkPastPresentationTimingGOOGLE, 16> timings;
+    uint32_t timingCount = (uint32_t)timings.size();
+    VkResult result = fn_vkGetPastPresentationTimingGOOGLE(m_Vulkan->device,
+                                                           swapchain,
+                                                           &timingCount,
+                                                           timings.data());
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
+        return;
+    }
+
+    bool receivedNewFeedback = false;
+    for (uint32_t i = 0; i < timingCount; i++) {
+        const VkPastPresentationTimingGOOGLE& timing = timings[i];
+        if (timing.presentID <= m_LastFeedbackPresentId || timing.actualPresentTime == 0) {
+            continue;
+        }
+
+        receivedNewFeedback = true;
+        m_LastFeedbackPresentId = timing.presentID;
+
+        if (m_LastActualPresentTimeNs != 0 &&
+            timing.actualPresentTime > m_LastActualPresentTimeNs) {
+            uint64_t interval = timing.actualPresentTime - m_LastActualPresentTimeNs;
+            m_PresentationIntervalsNs.push_back(interval);
+
+            if (m_RefreshDurationNs != 0) {
+                uint64_t refreshes = (interval + m_RefreshDurationNs / 2) /
+                                     m_RefreshDurationNs;
+                if (refreshes > 1) {
+                    m_TimingMissedVblanks += (uint32_t)(refreshes - 1);
+                }
+            }
+        }
+
+        m_LastActualPresentTimeNs = timing.actualPresentTime;
+
+        if (timing.desiredPresentTime != 0) {
+            uint64_t error = timing.actualPresentTime > timing.desiredPresentTime ?
+                                 timing.actualPresentTime - timing.desiredPresentTime :
+                                 timing.desiredPresentTime - timing.actualPresentTime;
+            m_PresentationErrorsNs.push_back(error);
+
+            if (m_RefreshDurationNs != 0 &&
+                timing.actualPresentTime > timing.desiredPresentTime + m_RefreshDurationNs / 2) {
+                m_TimingLateFrames++;
+            }
+        }
+    }
+
+    if (receivedNewFeedback) {
+        m_PresentsWithoutFeedback = 0;
+    }
+}
+
+void PlVkRenderer::logPresentationTiming(uint64_t nowNs)
+{
+    if (nowNs - m_TimingWindowStartNs < 5000000000ull ||
+        m_PresentationIntervalsNs.empty()) {
+        return;
+    }
+
+    std::vector<uint64_t> sortedIntervals = m_PresentationIntervalsNs;
+    std::sort(sortedIntervals.begin(), sortedIntervals.end());
+
+    uint64_t totalIntervalNs = 0;
+    for (uint64_t interval : sortedIntervals) {
+        totalIntervalNs += interval;
+    }
+
+    auto percentile = [](const std::vector<uint64_t>& values, int percent) {
+        size_t index = (values.size() - 1) * percent / 100;
+        return values[index];
+    };
+
+    double phaseP95Ms = 0.0;
+    if (!m_PresentationErrorsNs.empty()) {
+        std::sort(m_PresentationErrorsNs.begin(), m_PresentationErrorsNs.end());
+        phaseP95Ms = percentile(m_PresentationErrorsNs, 95) / 1000000.0;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Gamescope presentation timing: interval avg/p95/p99 %.3f/%.3f/%.3f ms, "
+                "phase p95 %.3f ms, missed %u, late %u, samples %zu",
+                (double)totalIntervalNs / sortedIntervals.size() / 1000000.0,
+                percentile(sortedIntervals, 95) / 1000000.0,
+                percentile(sortedIntervals, 99) / 1000000.0,
+                phaseP95Ms,
+                m_TimingMissedVblanks,
+                m_TimingLateFrames,
+                sortedIntervals.size());
+
+    m_TimingWindowStartNs = nowNs;
+    m_TimingMissedVblanks = 0;
+    m_TimingLateFrames = 0;
+    m_PresentationIntervalsNs.clear();
+    m_PresentationErrorsNs.clear();
+}
+
+void PlVkRenderer::preparePresent(VkSwapchainKHR swapchain,
+                                  VkPresentInfoKHR* presentInfo)
+{
+    if (swapchain != m_TimingSwapchain) {
+        resetPresentationTiming(swapchain);
+    }
+
+    collectPresentationFeedback(swapchain);
+
+    uint64_t nowNs = monotonicTimeNs();
+    logPresentationTiming(nowNs);
+
+    m_PresentsWithoutFeedback++;
+    if (!m_MissingFeedbackLogged &&
+        m_PresentsWithoutFeedback > (uint32_t)std::max(m_MaxVideoFps * 2, 120)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Gamescope presentation feedback stalled; timing remains FIFO-safe");
+        m_MissingFeedbackLogged = true;
+    }
+
+    uint64_t desiredPresentTime = 0;
+    if (m_RefreshDurationNs != 0 && m_LastActualPresentTimeNs != 0) {
+        uint64_t leadTimeNs = std::min<uint64_t>(
+            std::max<uint64_t>(m_RefreshDurationNs / 8, 500000), 2000000);
+        uint64_t earliestPresentTime = nowNs + leadTimeNs;
+        uint64_t elapsed = earliestPresentTime > m_LastActualPresentTimeNs ?
+                               earliestPresentTime - m_LastActualPresentTimeNs : 0;
+        uint64_t refreshes = (elapsed + m_RefreshDurationNs - 1) /
+                             m_RefreshDurationNs;
+        desiredPresentTime = m_LastActualPresentTimeNs + refreshes * m_RefreshDurationNs;
+    }
+
+    m_PresentTime.presentID = m_NextPresentId++;
+    if (m_NextPresentId == 0) {
+        m_NextPresentId = 1;
+    }
+    m_PresentTime.desiredPresentTime = desiredPresentTime;
+
+    m_PresentTimesInfo.sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE;
+    m_PresentTimesInfo.pNext = presentInfo->pNext;
+    m_PresentTimesInfo.swapchainCount = 1;
+    m_PresentTimesInfo.pTimes = &m_PresentTime;
+    presentInfo->pNext = &m_PresentTimesInfo;
+}
+#endif
 
 bool PlVkRenderer::prepareDecoderContext(AVCodecContext *context, AVDictionary **)
 {
@@ -1280,7 +1546,13 @@ bool PlVkRenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info)
 int PlVkRenderer::getRendererAttributes()
 {
     // This renderer supports HDR (including tone mapping to SDR displays)
-    return RENDERER_ATTRIBUTE_HDR_SUPPORT;
+    int attributes = RENDERER_ATTRIBUTE_HDR_SUPPORT;
+#ifdef Q_OS_LINUX
+    if (m_PresentationSyncRequested && m_DisplayTimingAvailable) {
+        attributes |= RENDERER_ATTRIBUTE_INTERNAL_PACING;
+    }
+#endif
+    return attributes;
 }
 
 int PlVkRenderer::getDecoderColorspace()

@@ -10,6 +10,8 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/vulkan.h>
 
+#include <vector>
+
 #ifdef Q_OS_DARWIN
 class MetalVulkanTextureFactory {
 public:
@@ -74,6 +76,16 @@ private:
     bool isPresentModeSupportedByPhysicalDevice(VkPhysicalDevice device, VkPresentModeKHR presentMode);
     bool isColorSpaceSupportedByPhysicalDevice(VkPhysicalDevice device, VkColorSpaceKHR colorSpace);
     bool isSurfacePresentationSupportedByPhysicalDevice(VkPhysicalDevice device);
+
+#ifdef Q_OS_LINUX
+    static void presentHook(void* context, VkSwapchainKHR swapchain,
+                            VkPresentInfoKHR* presentInfo);
+    static uint64_t monotonicTimeNs();
+    void preparePresent(VkSwapchainKHR swapchain, VkPresentInfoKHR* presentInfo);
+    void collectPresentationFeedback(VkSwapchainKHR swapchain);
+    void resetPresentationTiming(VkSwapchainKHR swapchain);
+    void logPresentationTiming(uint64_t nowNs);
+#endif
 
     // The backend renderer if we're frontend-only
     IFFmpegRenderer* m_Backend;
@@ -150,4 +162,28 @@ private:
     PFN_vkGetPhysicalDeviceProperties fn_vkGetPhysicalDeviceProperties = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR fn_vkGetPhysicalDeviceSurfaceSupportKHR = nullptr;
     PFN_vkEnumerateDeviceExtensionProperties fn_vkEnumerateDeviceExtensionProperties = nullptr;
+
+#ifdef Q_OS_LINUX
+    bool m_PresentationSyncRequested = false;
+    bool m_DisplayTimingAvailable = false;
+    bool m_MissingFeedbackLogged = false;
+    VkSwapchainKHR m_TimingSwapchain = VK_NULL_HANDLE;
+    PFN_vkGetDeviceProcAddr fn_vkGetDeviceProcAddr = nullptr;
+    PFN_vkGetRefreshCycleDurationGOOGLE fn_vkGetRefreshCycleDurationGOOGLE = nullptr;
+    PFN_vkGetPastPresentationTimingGOOGLE fn_vkGetPastPresentationTimingGOOGLE = nullptr;
+    VkPresentTimeGOOGLE m_PresentTime = {};
+    VkPresentTimesInfoGOOGLE m_PresentTimesInfo = {
+        VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE
+    };
+    uint32_t m_NextPresentId = 1;
+    uint32_t m_LastFeedbackPresentId = 0;
+    uint32_t m_PresentsWithoutFeedback = 0;
+    uint64_t m_RefreshDurationNs = 0;
+    uint64_t m_LastActualPresentTimeNs = 0;
+    uint64_t m_TimingWindowStartNs = 0;
+    uint32_t m_TimingMissedVblanks = 0;
+    uint32_t m_TimingLateFrames = 0;
+    std::vector<uint64_t> m_PresentationIntervalsNs;
+    std::vector<uint64_t> m_PresentationErrorsNs;
+#endif
 };

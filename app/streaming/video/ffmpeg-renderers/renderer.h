@@ -136,6 +136,7 @@ private:
 #define RENDERER_ATTRIBUTE_HDR_SUPPORT 0x04
 #define RENDERER_ATTRIBUTE_NO_BUFFERING 0x08
 #define RENDERER_ATTRIBUTE_FORCE_PACING 0x10
+#define RENDERER_ATTRIBUTE_INTERNAL_PACING 0x20
 
 class IFFmpegRenderer : public Overlay::IOverlayRenderer {
 public:

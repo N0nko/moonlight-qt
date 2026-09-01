@@ -3,6 +3,8 @@
 #include <Qt>
 #include <QDir>
 
+#include <cmath>
+
 #ifdef Q_OS_DARWIN
 #include <ApplicationServices/ApplicationServices.h>
 #endif
@@ -16,6 +18,10 @@
 #include <fcntl.h>
 
 #include <SDL_syswm.h>
+#endif
+
+#ifdef HAS_XRANDR
+#include <X11/extensions/Xrandr.h>
 #endif
 
 #ifdef Q_OS_LINUX
@@ -200,6 +206,98 @@ int StreamUtils::getDisplayRefreshRate(SDL_Window* window)
     }
 
     return mode.refresh_rate;
+}
+
+int StreamUtils::getDisplayRefreshRateX100(SDL_Window* window)
+{
+    int fallbackRate = getDisplayRefreshRate(window) * 100;
+
+#ifdef HAS_XRANDR
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (!SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_X11) {
+        return fallbackRate;
+    }
+
+    Display* display = info.info.x11.display;
+    Window xWindow = info.info.x11.window;
+    XWindowAttributes attributes;
+    if (!XGetWindowAttributes(display, xWindow, &attributes)) {
+        return fallbackRate;
+    }
+
+    int windowX = 0;
+    int windowY = 0;
+    Window child;
+    XTranslateCoordinates(display, xWindow, attributes.root, 0, 0,
+                          &windowX, &windowY, &child);
+
+    int windowWidth = 0;
+    int windowHeight = 0;
+    SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+    int windowCenterX = windowX + windowWidth / 2;
+    int windowCenterY = windowY + windowHeight / 2;
+
+    XRRScreenResources* resources =
+        XRRGetScreenResourcesCurrent(display, attributes.root);
+    if (resources == nullptr) {
+        return fallbackRate;
+    }
+
+    RRMode selectedMode = None;
+    RRMode firstActiveMode = None;
+    for (int i = 0; i < resources->ncrtc; i++) {
+        XRRCrtcInfo* crtc = XRRGetCrtcInfo(display, resources,
+                                          resources->crtcs[i]);
+        if (crtc == nullptr) {
+            continue;
+        }
+
+        if (crtc->mode != None && firstActiveMode == None) {
+            firstActiveMode = crtc->mode;
+        }
+
+        if (crtc->mode != None &&
+            windowCenterX >= crtc->x && windowCenterX < crtc->x + (int)crtc->width &&
+            windowCenterY >= crtc->y && windowCenterY < crtc->y + (int)crtc->height) {
+            selectedMode = crtc->mode;
+            XRRFreeCrtcInfo(crtc);
+            break;
+        }
+
+        XRRFreeCrtcInfo(crtc);
+    }
+
+    if (selectedMode == None) {
+        selectedMode = firstActiveMode;
+    }
+
+    int refreshRateX100 = fallbackRate;
+    for (int i = 0; i < resources->nmode; i++) {
+        const XRRModeInfo& mode = resources->modes[i];
+        if (mode.id != selectedMode || mode.hTotal == 0 || mode.vTotal == 0) {
+            continue;
+        }
+
+        double verticalTotal = mode.vTotal;
+        if (mode.modeFlags & RR_DoubleScan) {
+            verticalTotal *= 2.0;
+        }
+        if (mode.modeFlags & RR_Interlace) {
+            verticalTotal /= 2.0;
+        }
+
+        double refreshRate = (double)mode.dotClock /
+                             ((double)mode.hTotal * verticalTotal);
+        refreshRateX100 = (int)std::lround(refreshRate * 100.0);
+        break;
+    }
+
+    XRRFreeScreenResources(resources);
+    return refreshRateX100;
+#else
+    return fallbackRate;
+#endif
 }
 
 bool StreamUtils::hasFastAes()
