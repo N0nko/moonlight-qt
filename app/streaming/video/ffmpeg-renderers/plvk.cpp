@@ -769,25 +769,29 @@ void PlVkRenderer::resetPresentationTiming(VkSwapchainKHR swapchain)
     m_PresentationIntervalsNs.reserve(std::max(m_MaxVideoFps * 6, 360));
     m_PresentationErrorsNs.reserve(std::max(m_MaxVideoFps * 6, 360));
 
-    VkRefreshCycleDurationGOOGLE cycle = {};
-    if (fn_vkGetRefreshCycleDurationGOOGLE(m_Vulkan->device, swapchain, &cycle) == VK_SUCCESS &&
-        cycle.refreshDuration != 0) {
-        m_RefreshDurationNs = cycle.refreshDuration;
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Gamescope presentation clock: %.3f Hz (%.3f ms)",
-                    1000000000.0 / m_RefreshDurationNs,
-                    m_RefreshDurationNs / 1000000.0);
-    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Gamescope presentation timing armed; waiting for first feedback");
 }
 
 void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
 {
     std::array<VkPastPresentationTimingGOOGLE, 16> timings;
-    uint32_t timingCount = (uint32_t)timings.size();
+    uint32_t timingCount = 0;
     VkResult result = fn_vkGetPastPresentationTimingGOOGLE(m_Vulkan->device,
                                                            swapchain,
                                                            &timingCount,
-                                                           timings.data());
+                                                           nullptr);
+    if (result != VK_SUCCESS || timingCount == 0) {
+        return;
+    }
+
+    // Gamescope 3.16.26 mishandles capacity larger than its pending count.
+    // Querying first and fetching exactly that count avoids the driver bug.
+    timingCount = std::min<uint32_t>(timingCount, (uint32_t)timings.size());
+    result = fn_vkGetPastPresentationTimingGOOGLE(m_Vulkan->device,
+                                                  swapchain,
+                                                  &timingCount,
+                                                  timings.data());
     if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
         return;
     }
@@ -833,6 +837,20 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
 
     if (receivedNewFeedback) {
         m_PresentsWithoutFeedback = 0;
+
+        if (m_RefreshDurationNs == 0) {
+            VkRefreshCycleDurationGOOGLE cycle = {};
+            if (fn_vkGetRefreshCycleDurationGOOGLE(m_Vulkan->device,
+                                                    swapchain,
+                                                    &cycle) == VK_SUCCESS &&
+                cycle.refreshDuration != 0) {
+                m_RefreshDurationNs = cycle.refreshDuration;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "Gamescope presentation sync active: %.3f Hz (%.3f ms)",
+                            1000000000.0 / m_RefreshDurationNs,
+                            m_RefreshDurationNs / 1000000.0);
+            }
+        }
     }
 }
 

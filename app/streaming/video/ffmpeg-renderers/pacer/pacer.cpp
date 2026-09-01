@@ -316,7 +316,7 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing)
     }
     else if (rendererPacing) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Frame pacing active: renderer presentation clock at %d Hz for %d FPS stream",
+                    "Frame pacing armed: renderer feedback at %d Hz for %d FPS stream",
                     m_DisplayFps, m_MaxVideoFps);
     }
     else if (m_VsyncSource != nullptr) {
