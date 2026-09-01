@@ -1,0 +1,34 @@
+diff --git a/src/include/libplacebo/vulkan.h b/src/include/libplacebo/vulkan.h
+index a121da30..6b99c115 100644
+--- a/src/include/libplacebo/vulkan.h
++++ b/src/include/libplacebo/vulkan.h
+@@ -345,6 +345,13 @@ struct pl_vulkan_swapchain_params {
+     // Optional, defaults to 3.
+     int swapchain_depth;
+ 
++    // Optional hook called immediately before vkQueuePresentKHR. This allows
++    // API users to append platform-specific presentation metadata to pNext.
++    // Any referenced memory must remain valid until vkQueuePresentKHR returns.
++    void (*present_hook)(void *priv, VkSwapchainKHR swapchain,
++                         VkPresentInfoKHR *present_info);
++    void *present_hook_priv;
++
+     // This suppresses automatic recreation of the swapchain when any call
+     // returns VK_SUBOPTIMAL_KHR. Normally, libplacebo will recreate the
+     // swapchain internally on the next `pl_swapchain_start_frame`. If enabled,
+diff --git a/src/vulkan/swapchain.c b/src/vulkan/swapchain.c
+index 90f5da31..be442904 100644
+--- a/src/vulkan/swapchain.c
++++ b/src/vulkan/swapchain.c
+@@ -1016,6 +1016,11 @@ static bool vk_sw_submit_frame(pl_swapchain sw)
+         pinfo.pNext = &fenceInfo;
+     }
+ 
++    if (p->params.present_hook) {
++        p->params.present_hook(p->params.present_hook_priv,
++                               current->swapchain, &pinfo);
++    }
++
+     PL_TRACE(vk, "vkQueuePresentKHR waits on 0x%"PRIx64, (uint64_t) sem_out);
+     vk->lock_queue(vk->queue_ctx, pool->qf, qidx);
+     VkResult res = vk->QueuePresentKHR(queue, &pinfo);

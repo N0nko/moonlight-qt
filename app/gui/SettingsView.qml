@@ -906,7 +906,9 @@ Flickable {
                     CheckBox {
                         id: framePacingCheck
                         hoverEnabled: true
-                        text: qsTr("Frame pacing")
+                        text: Qt.platform.os === "linux" ?
+                                  qsTr("Gamescope frame pacing (preview)") :
+                                  qsTr("Frame pacing")
                         font.pointSize:  12
                         enabled: StreamingPreferences.enableVsync
                         checked: StreamingPreferences.enableVsync && StreamingPreferences.framePacing
@@ -916,7 +918,9 @@ Flickable {
                         ToolTip.delay: 1000
                         ToolTip.timeout: 5000
                         ToolTip.visible: hovered
-                        ToolTip.text: qsTr("Frame pacing reduces micro-stutter by delaying frames that come in too early")
+                        ToolTip.text: Qt.platform.os === "linux" ?
+                                              qsTr("Aligns Vulkan frames to Gamescope's presentation clock and records timing measurements. Takes effect on the next stream.") :
+                                              qsTr("Frame pacing reduces micro-stutter by delaying frames that come in too early")
                     }
                 }
 

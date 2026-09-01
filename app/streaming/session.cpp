@@ -930,6 +930,12 @@ bool Session::initialize(QQuickWindow* qtWindow)
 
     m_StreamConfig.fps = m_Preferences->fps;
     m_StreamConfig.bitrate = m_Preferences->bitrateKbps;
+    m_StreamConfig.clientRefreshRateX100 =
+        StreamUtils::getDisplayRefreshRateX100(testWindow);
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Client display refresh rate: %.2f Hz",
+                m_StreamConfig.clientRefreshRateX100 / 100.0);
 
 #ifndef STEAM_LINK
     // Opt-in to all encryption features if we detect that the platform

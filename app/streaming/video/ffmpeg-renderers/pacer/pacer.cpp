@@ -269,11 +269,8 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing)
     m_DisplayFps = StreamUtils::getDisplayRefreshRate(window);
     m_RendererAttributes = m_VsyncRenderer->getRendererAttributes();
 
-    if (enablePacing) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Frame pacing: target %d Hz with %d FPS stream",
-                    m_DisplayFps, m_MaxVideoFps);
-
+    bool rendererPacing = m_RendererAttributes & RENDERER_ATTRIBUTE_INTERNAL_PACING;
+    if (enablePacing && !rendererPacing) {
         SDL_SysWMinfo info;
         SDL_VERSION(&info.version);
         if (!SDL_GetWindowWMInfo(window, &info)) {
@@ -311,10 +308,25 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing)
             m_VsyncSource = nullptr;
         }
     }
-    else {
+
+    if (!enablePacing) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Frame pacing disabled: target %d Hz with %d FPS stream",
                     m_DisplayFps, m_MaxVideoFps);
+    }
+    else if (rendererPacing) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Frame pacing active: renderer presentation clock at %d Hz for %d FPS stream",
+                    m_DisplayFps, m_MaxVideoFps);
+    }
+    else if (m_VsyncSource != nullptr) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Frame pacing active: VBlank source at %d Hz for %d FPS stream",
+                    m_DisplayFps, m_MaxVideoFps);
+    }
+    else {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Frame pacing requested but no timing source is available; using renderer FIFO");
     }
 
     if (m_VsyncSource != nullptr) {
