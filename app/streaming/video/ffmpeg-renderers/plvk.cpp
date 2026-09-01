@@ -753,12 +753,12 @@ void PlVkRenderer::resetPresentationTiming(VkSwapchainKHR swapchain)
     m_NextPresentId = 1;
     m_LastFeedbackPresentId = 0;
     m_PresentsWithoutFeedback = 0;
+    m_FeedbackPollCountdown = 0;
     m_RefreshDurationNs = 0;
     m_LastActualPresentTimeNs = 0;
     m_ClockSampleCount = 0;
     m_TimingWindowStartNs = monotonicTimeNs();
     m_TimingMissedVblanks = 0;
-    m_TimingLateFrames = 0;
     m_MissingFeedbackLogged = false;
     m_PresentationIntervalsNs.clear();
     m_PresentationErrorsNs.clear();
@@ -828,12 +828,11 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
             uint64_t error = timing.actualPresentTime > timing.desiredPresentTime ?
                                  timing.actualPresentTime - timing.desiredPresentTime :
                                  timing.desiredPresentTime - timing.actualPresentTime;
-            m_PresentationErrorsNs.push_back(error);
-
-            if (m_RefreshDurationNs != 0 &&
-                timing.actualPresentTime > timing.desiredPresentTime + m_RefreshDurationNs / 2) {
-                m_TimingLateFrames++;
+            if (m_RefreshDurationNs != 0) {
+                error %= m_RefreshDurationNs;
+                error = std::min(error, m_RefreshDurationNs - error);
             }
+            m_PresentationErrorsNs.push_back(error);
         }
     }
 
@@ -889,18 +888,16 @@ void PlVkRenderer::logPresentationTiming(uint64_t nowNs)
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Gamescope presentation timing: interval avg/p95/p99 %.3f/%.3f/%.3f ms, "
-                "phase p95 %.3f ms, missed %u, late %u, samples %zu",
+                "phase p95 %.3f ms, missed %u, samples %zu",
                 (double)totalIntervalNs / sortedIntervals.size() / 1000000.0,
                 percentile(sortedIntervals, 95) / 1000000.0,
                 percentile(sortedIntervals, 99) / 1000000.0,
                 phaseP95Ms,
                 m_TimingMissedVblanks,
-                m_TimingLateFrames,
                 sortedIntervals.size());
 
     m_TimingWindowStartNs = nowNs;
     m_TimingMissedVblanks = 0;
-    m_TimingLateFrames = 0;
     m_PresentationIntervalsNs.clear();
     m_PresentationErrorsNs.clear();
 }
@@ -912,7 +909,13 @@ void PlVkRenderer::preparePresent(VkSwapchainKHR swapchain,
         resetPresentationTiming(swapchain);
     }
 
-    collectPresentationFeedback(swapchain);
+    if (m_RefreshDurationNs == 0 || m_FeedbackPollCountdown == 0) {
+        collectPresentationFeedback(swapchain);
+        m_FeedbackPollCountdown = m_RefreshDurationNs == 0 ? 0 : 7;
+    }
+    else {
+        m_FeedbackPollCountdown--;
+    }
 
     uint64_t nowNs = monotonicTimeNs();
     logPresentationTiming(nowNs);
