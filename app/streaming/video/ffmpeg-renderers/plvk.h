@@ -10,6 +10,7 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/vulkan.h>
 
+#include <array>
 #include <vector>
 
 #ifdef Q_OS_DARWIN
@@ -169,7 +170,6 @@ private:
     bool m_MissingFeedbackLogged = false;
     VkSwapchainKHR m_TimingSwapchain = VK_NULL_HANDLE;
     PFN_vkGetDeviceProcAddr fn_vkGetDeviceProcAddr = nullptr;
-    PFN_vkGetRefreshCycleDurationGOOGLE fn_vkGetRefreshCycleDurationGOOGLE = nullptr;
     PFN_vkGetPastPresentationTimingGOOGLE fn_vkGetPastPresentationTimingGOOGLE = nullptr;
     VkPresentTimeGOOGLE m_PresentTime = {};
     VkPresentTimesInfoGOOGLE m_PresentTimesInfo = {
@@ -180,6 +180,8 @@ private:
     uint32_t m_PresentsWithoutFeedback = 0;
     uint64_t m_RefreshDurationNs = 0;
     uint64_t m_LastActualPresentTimeNs = 0;
+    std::array<uint64_t, 32> m_ClockSamples = {};
+    size_t m_ClockSampleCount = 0;
     uint64_t m_TimingWindowStartNs = 0;
     uint32_t m_TimingMissedVblanks = 0;
     uint32_t m_TimingLateFrames = 0;

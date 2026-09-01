@@ -439,18 +439,13 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
             fn_vkGetDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
                 m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, "vkGetDeviceProcAddr"));
             if (fn_vkGetDeviceProcAddr != nullptr) {
-                fn_vkGetRefreshCycleDurationGOOGLE =
-                    reinterpret_cast<PFN_vkGetRefreshCycleDurationGOOGLE>(
-                        fn_vkGetDeviceProcAddr(m_Vulkan->device,
-                                               "vkGetRefreshCycleDurationGOOGLE"));
                 fn_vkGetPastPresentationTimingGOOGLE =
                     reinterpret_cast<PFN_vkGetPastPresentationTimingGOOGLE>(
                         fn_vkGetDeviceProcAddr(m_Vulkan->device,
                                                "vkGetPastPresentationTimingGOOGLE"));
             }
 
-            m_DisplayTimingAvailable = fn_vkGetRefreshCycleDurationGOOGLE != nullptr &&
-                                       fn_vkGetPastPresentationTimingGOOGLE != nullptr;
+            m_DisplayTimingAvailable = fn_vkGetPastPresentationTimingGOOGLE != nullptr;
         }
 
         if (m_DisplayTimingAvailable) {
@@ -760,6 +755,7 @@ void PlVkRenderer::resetPresentationTiming(VkSwapchainKHR swapchain)
     m_PresentsWithoutFeedback = 0;
     m_RefreshDurationNs = 0;
     m_LastActualPresentTimeNs = 0;
+    m_ClockSampleCount = 0;
     m_TimingWindowStartNs = monotonicTimeNs();
     m_TimingMissedVblanks = 0;
     m_TimingLateFrames = 0;
@@ -811,6 +807,12 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
             uint64_t interval = timing.actualPresentTime - m_LastActualPresentTimeNs;
             m_PresentationIntervalsNs.push_back(interval);
 
+            if (m_RefreshDurationNs == 0 &&
+                m_ClockSampleCount < m_ClockSamples.size() &&
+                interval >= 4000000 && interval <= 40000000) {
+                m_ClockSamples[m_ClockSampleCount++] = interval;
+            }
+
             if (m_RefreshDurationNs != 0) {
                 uint64_t refreshes = (interval + m_RefreshDurationNs / 2) /
                                      m_RefreshDurationNs;
@@ -838,17 +840,22 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
     if (receivedNewFeedback) {
         m_PresentsWithoutFeedback = 0;
 
-        if (m_RefreshDurationNs == 0) {
-            VkRefreshCycleDurationGOOGLE cycle = {};
-            if (fn_vkGetRefreshCycleDurationGOOGLE(m_Vulkan->device,
-                                                    swapchain,
-                                                    &cycle) == VK_SUCCESS &&
-                cycle.refreshDuration != 0) {
-                m_RefreshDurationNs = cycle.refreshDuration;
+        if (m_RefreshDurationNs == 0 &&
+            m_ClockSampleCount == m_ClockSamples.size()) {
+            auto sortedSamples = m_ClockSamples;
+            std::sort(sortedSamples.begin(), sortedSamples.end());
+            uint64_t median = (sortedSamples[15] + sortedSamples[16]) / 2;
+            uint64_t interquartileSpread = sortedSamples[23] - sortedSamples[7];
+
+            if (interquartileSpread <= median / 20) {
+                m_RefreshDurationNs = median;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "Gamescope presentation sync active: %.3f Hz (%.3f ms)",
+                            "Gamescope presentation sync active: measured %.3f Hz (%.3f ms)",
                             1000000000.0 / m_RefreshDurationNs,
                             m_RefreshDurationNs / 1000000.0);
+            }
+            else {
+                m_ClockSampleCount = 0;
             }
         }
     }
