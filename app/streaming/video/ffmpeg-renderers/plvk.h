@@ -178,13 +178,13 @@ private:
     uint32_t m_NextPresentId = 1;
     uint32_t m_LastFeedbackPresentId = 0;
     uint32_t m_PresentsWithoutFeedback = 0;
+    uint32_t m_FeedbackPollCountdown = 0;
     uint64_t m_RefreshDurationNs = 0;
     uint64_t m_LastActualPresentTimeNs = 0;
     std::array<uint64_t, 32> m_ClockSamples = {};
     size_t m_ClockSampleCount = 0;
     uint64_t m_TimingWindowStartNs = 0;
     uint32_t m_TimingMissedVblanks = 0;
-    uint32_t m_TimingLateFrames = 0;
     std::vector<uint64_t> m_PresentationIntervalsNs;
     std::vector<uint64_t> m_PresentationErrorsNs;
 #endif
