@@ -2,7 +2,9 @@
 
 #include <functional>
 #include <QQueue>
+#include <QMutex>
 #include <set>
+#include <vector>
 
 #include "../bandwidth.h"
 #include "decoder.h"
@@ -102,6 +104,12 @@ private:
 
     void decoderThreadProc();
 
+    void recordPacingFrameReceived(PDECODE_UNIT du);
+
+    void recordPacingFrameDecoded(const DECODE_UNIT& du, uint64_t decodeReadyUs);
+
+    void logPacingDiagnostics(uint64_t nowUs);
+
     static int decoderThreadProcThunk(void* context);
 
     AVPacket* m_Pkt;
@@ -114,6 +122,22 @@ private:
     int m_ConsecutiveFailedDecodes;
     Pacer* m_Pacer;
     BandwidthTracker m_BwTracker;
+    bool m_PacingDiagnostics;
+    QMutex m_PacingDiagnosticsLock;
+    uint64_t m_PacingDiagnosticWindowStartUs;
+    uint64_t m_LastPresentationUs;
+    uint64_t m_LastFirstPacketUs;
+    uint64_t m_LastCompletedFrameUs;
+    uint64_t m_LastDecodeReadyUs;
+    int m_DiagnosticLastFrameNumber;
+    uint32_t m_DiagnosticFrameGaps;
+    std::vector<uint64_t> m_DiagnosticSourceIntervalsUs;
+    std::vector<uint64_t> m_DiagnosticFirstPacketIntervalsUs;
+    std::vector<uint64_t> m_DiagnosticCompletedFrameIntervalsUs;
+    std::vector<uint64_t> m_DiagnosticReassemblyUs;
+    std::vector<uint64_t> m_DiagnosticHostProcessingUs;
+    std::vector<uint64_t> m_DiagnosticDecodeUs;
+    std::vector<uint64_t> m_DiagnosticDecodeReadyIntervalsUs;
     VIDEO_STATS m_ActiveWndVideoStats;
     VIDEO_STATS m_LastWndVideoStats;
     VIDEO_STATS m_GlobalVideoStats;

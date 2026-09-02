@@ -480,7 +480,10 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
                             int frameRate, bool enableVsync, bool enableFramePacing, bool testOnly,
                             IVideoDecoder*& chosenDecoder,
                             DecoderFramePresentedCallback framePresentedCallback,
-                            void* framePresentedContext)
+                            void* framePresentedContext,
+                            StreamingPreferences::PacingMode pacingMode,
+                            bool enableFrameReserve,
+                            bool pacingDiagnostics)
 {
     DECODER_PARAMETERS params;
 
@@ -496,6 +499,9 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
     params.window = window;
     params.enableVsync = enableVsync;
     params.enableFramePacing = enableFramePacing;
+    params.pacingMode = pacingMode;
+    params.enableFrameReserve = enableFrameReserve;
+    params.pacingDiagnostics = pacingDiagnostics;
     params.testOnly = testOnly;
     params.vds = vds;
     params.renderer = renderer;
@@ -2056,16 +2062,36 @@ bool Session::recreateVideoDecoder(bool flushEvents,
         enableVsync = false;
     }
 
+#ifdef Q_OS_LINUX
+    StreamingPreferences::PacingMode pacingMode = m_Preferences->pacingMode;
+    bool enableFrameReserve = m_Preferences->frameReserve;
+    bool pacingDiagnostics = m_Preferences->pacingDiagnostics;
+#else
+    // Preserve the existing non-Linux frame-pacing preference and behavior.
+    StreamingPreferences::PacingMode pacingMode = m_Preferences->framePacing ?
+        StreamingPreferences::PM_CURRENT : StreamingPreferences::PM_FIFO;
+    bool enableFrameReserve = false;
+    bool pacingDiagnostics = false;
+#endif
+
+    if (!enableVsync) {
+        pacingMode = StreamingPreferences::PM_FIFO;
+        enableFrameReserve = false;
+    }
+
     if (!chooseDecoder(m_Preferences->videoDecoderSelection,
                        m_Preferences->rendererSelection,
                        m_Window, m_ActiveVideoFormat, m_ActiveVideoWidth,
                        m_ActiveVideoHeight, m_ActiveVideoFrameRate,
                        enableVsync,
-                       enableVsync && m_Preferences->framePacing,
+                       pacingMode != StreamingPreferences::PM_FIFO,
                        false,
                        m_VideoDecoder,
                        framePresentedCallback,
-                       framePresentedContext)) {
+                       framePresentedContext,
+                       pacingMode,
+                       enableFrameReserve,
+                       pacingDiagnostics)) {
         SDL_UnlockMutex(m_DecoderLock);
         return false;
     }

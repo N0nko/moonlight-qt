@@ -39,6 +39,9 @@
 #define SER_ABSTOUCHMODE "abstouchmode"
 #define SER_STARTWINDOWED "startwindowed"
 #define SER_FRAMEPACING "framepacing"
+#define SER_PACINGMODE "pacingmode"
+#define SER_FRAMERESERVE "framereserve"
+#define SER_PACINGDIAGNOSTICS "pacingdiagnostics"
 #define SER_CONNWARNINGS "connwarnings"
 #define SER_CONFWARNINGS "confwarnings"
 #define SER_UIDISPLAYMODE "uidisplaymode"
@@ -171,6 +174,14 @@ void StreamingPreferences::reload()
     absoluteMouseMode = settings.value(SER_ABSMOUSEMODE, false).toBool();
     absoluteTouchMode = settings.value(SER_ABSTOUCHMODE, true).toBool();
     framePacing = settings.value(SER_FRAMEPACING, false).toBool();
+    int savedPacingMode = settings.value(SER_PACINGMODE,
+                                         framePacing ? PM_CURRENT : PM_FIFO).toInt();
+    if (savedPacingMode < PM_FIFO || savedPacingMode > PM_SMOOTH) {
+        savedPacingMode = framePacing ? PM_CURRENT : PM_FIFO;
+    }
+    pacingMode = static_cast<PacingMode>(savedPacingMode);
+    frameReserve = settings.value(SER_FRAMERESERVE, false).toBool();
+    pacingDiagnostics = settings.value(SER_PACINGDIAGNOSTICS, false).toBool();
     connectionWarnings = settings.value(SER_CONNWARNINGS, true).toBool();
     configurationWarnings = settings.value(SER_CONFWARNINGS, true).toBool();
     richPresence = settings.value(SER_RICHPRESENCE, true).toBool();
@@ -372,7 +383,17 @@ void StreamingPreferences::save()
     settings.setValue(SER_QUITAPPAFTER, quitAppAfter);
     settings.setValue(SER_ABSMOUSEMODE, absoluteMouseMode);
     settings.setValue(SER_ABSTOUCHMODE, absoluteTouchMode);
+#ifdef Q_OS_LINUX
+    // Keep the legacy preference coherent for rollback builds.
+    settings.setValue(SER_FRAMEPACING, pacingMode != PM_FIFO);
+    settings.setValue(SER_PACINGMODE, static_cast<int>(pacingMode));
+#else
     settings.setValue(SER_FRAMEPACING, framePacing);
+    settings.setValue(SER_PACINGMODE,
+                      static_cast<int>(framePacing ? PM_CURRENT : PM_FIFO));
+#endif
+    settings.setValue(SER_FRAMERESERVE, frameReserve);
+    settings.setValue(SER_PACINGDIAGNOSTICS, pacingDiagnostics);
     settings.setValue(SER_CONNWARNINGS, connectionWarnings);
     settings.setValue(SER_CONFWARNINGS, configurationWarnings);
     settings.setValue(SER_RICHPRESENCE, richPresence);

@@ -5,6 +5,8 @@
 
 #include <h264_stream.h>
 
+#include <algorithm>
+
 extern "C" {
 #include <libavutil/mastering_display_metadata.h>
 #include <libavutil/pixdesc.h>
@@ -228,6 +230,14 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
       m_ConsecutiveFailedDecodes(0),
       m_Pacer(nullptr),
       m_BwTracker(10, 250),
+      m_PacingDiagnostics(false),
+      m_PacingDiagnosticWindowStartUs(0),
+      m_LastPresentationUs(0),
+      m_LastFirstPacketUs(0),
+      m_LastCompletedFrameUs(0),
+      m_LastDecodeReadyUs(0),
+      m_DiagnosticLastFrameNumber(0),
+      m_DiagnosticFrameGaps(0),
       m_FramesIn(0),
       m_FramesOut(0),
       m_LastFrameNumber(0),
@@ -501,7 +511,9 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
                             params->framePresentedCallback,
                             params->framePresentedContext);
         if (!m_Pacer->initialize(params->window, params->frameRate,
-                                 params->enableFramePacing || (params->enableVsync && (m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_FORCE_PACING)))) {
+                                 params->enableFramePacing || (params->enableVsync && (m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_FORCE_PACING)),
+                                 params->enableFrameReserve,
+                                 params->pacingDiagnostics)) {
             return false;
         }
     }
@@ -989,6 +1001,152 @@ void FFmpegVideoDecoder::logVideoStats(VIDEO_STATS& stats, const char* title)
                     "\n%s\n------------------\n%s",
                     title, videoStatsStr);
     }
+}
+
+void FFmpegVideoDecoder::recordPacingFrameReceived(PDECODE_UNIT du)
+{
+    if (!m_PacingDiagnostics) {
+        return;
+    }
+
+    {
+        QMutexLocker locker(&m_PacingDiagnosticsLock);
+
+        if (m_LastPresentationUs != 0 && du->presentationTimeUs > m_LastPresentationUs) {
+            m_DiagnosticSourceIntervalsUs.push_back(du->presentationTimeUs - m_LastPresentationUs);
+        }
+        if (m_LastFirstPacketUs != 0 && du->receiveTimeUs > m_LastFirstPacketUs) {
+            m_DiagnosticFirstPacketIntervalsUs.push_back(du->receiveTimeUs - m_LastFirstPacketUs);
+        }
+        if (m_LastCompletedFrameUs != 0 && du->enqueueTimeUs > m_LastCompletedFrameUs) {
+            m_DiagnosticCompletedFrameIntervalsUs.push_back(du->enqueueTimeUs - m_LastCompletedFrameUs);
+        }
+        if (du->enqueueTimeUs >= du->receiveTimeUs) {
+            m_DiagnosticReassemblyUs.push_back(du->enqueueTimeUs - du->receiveTimeUs);
+        }
+        if (du->frameHostProcessingLatency != 0) {
+            m_DiagnosticHostProcessingUs.push_back(
+                static_cast<uint64_t>(du->frameHostProcessingLatency) * 100);
+        }
+        if (m_DiagnosticLastFrameNumber != 0 &&
+            du->frameNumber > m_DiagnosticLastFrameNumber + 1) {
+            m_DiagnosticFrameGaps += du->frameNumber - (m_DiagnosticLastFrameNumber + 1);
+        }
+
+        m_LastPresentationUs = du->presentationTimeUs;
+        m_LastFirstPacketUs = du->receiveTimeUs;
+        m_LastCompletedFrameUs = du->enqueueTimeUs;
+        m_DiagnosticLastFrameNumber = du->frameNumber;
+    }
+
+    logPacingDiagnostics(du->enqueueTimeUs);
+}
+
+void FFmpegVideoDecoder::recordPacingFrameDecoded(const DECODE_UNIT& du,
+                                                   uint64_t decodeReadyUs)
+{
+    if (!m_PacingDiagnostics) {
+        return;
+    }
+
+    {
+        QMutexLocker locker(&m_PacingDiagnosticsLock);
+
+        if (decodeReadyUs >= du.enqueueTimeUs) {
+            m_DiagnosticDecodeUs.push_back(decodeReadyUs - du.enqueueTimeUs);
+        }
+        if (m_LastDecodeReadyUs != 0 && decodeReadyUs > m_LastDecodeReadyUs) {
+            m_DiagnosticDecodeReadyIntervalsUs.push_back(decodeReadyUs - m_LastDecodeReadyUs);
+        }
+        m_LastDecodeReadyUs = decodeReadyUs;
+    }
+
+    logPacingDiagnostics(decodeReadyUs);
+}
+
+void FFmpegVideoDecoder::logPacingDiagnostics(uint64_t nowUs)
+{
+    if (!m_PacingDiagnostics) {
+        return;
+    }
+
+    std::vector<uint64_t> sourceIntervalsUs;
+    std::vector<uint64_t> firstPacketIntervalsUs;
+    std::vector<uint64_t> completedFrameIntervalsUs;
+    std::vector<uint64_t> reassemblyUs;
+    std::vector<uint64_t> hostProcessingUs;
+    std::vector<uint64_t> decodeUs;
+    std::vector<uint64_t> decodeReadyIntervalsUs;
+    uint32_t frameGaps;
+
+    {
+        QMutexLocker locker(&m_PacingDiagnosticsLock);
+
+        if (nowUs < m_PacingDiagnosticWindowStartUs ||
+            nowUs - m_PacingDiagnosticWindowStartUs < 5000000ull) {
+            return;
+        }
+
+        sourceIntervalsUs.swap(m_DiagnosticSourceIntervalsUs);
+        firstPacketIntervalsUs.swap(m_DiagnosticFirstPacketIntervalsUs);
+        completedFrameIntervalsUs.swap(m_DiagnosticCompletedFrameIntervalsUs);
+        reassemblyUs.swap(m_DiagnosticReassemblyUs);
+        hostProcessingUs.swap(m_DiagnosticHostProcessingUs);
+        decodeUs.swap(m_DiagnosticDecodeUs);
+        decodeReadyIntervalsUs.swap(m_DiagnosticDecodeReadyIntervalsUs);
+        frameGaps = m_DiagnosticFrameGaps;
+        m_DiagnosticFrameGaps = 0;
+        m_PacingDiagnosticWindowStartUs = nowUs;
+    }
+
+    auto sortSamples = [](std::vector<uint64_t>& values) {
+        std::sort(values.begin(), values.end());
+    };
+    auto percentile = [](const std::vector<uint64_t>& values, int percent) -> uint64_t {
+        if (values.empty()) {
+            return 0;
+        }
+        return values[(values.size() - 1) * percent / 100];
+    };
+    auto maximum = [](const std::vector<uint64_t>& values) -> uint64_t {
+        return values.empty() ? 0 : values.back();
+    };
+
+    sortSamples(sourceIntervalsUs);
+    sortSamples(firstPacketIntervalsUs);
+    sortSamples(completedFrameIntervalsUs);
+    sortSamples(reassemblyUs);
+    sortSamples(hostProcessingUs);
+    sortSamples(decodeUs);
+    sortSamples(decodeReadyIntervalsUs);
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Pacing pipeline timing: source p95/p99/max %.3f/%.3f/%.3f ms, "
+                "first p95/p99/max %.3f/%.3f/%.3f ms, "
+                "complete p95/p99/max %.3f/%.3f/%.3f ms, "
+                "reassembly p99/max %.3f/%.3f ms, host p99/max %.3f/%.3f ms, "
+                "decode p99/max %.3f/%.3f ms, ready p95/p99/max %.3f/%.3f/%.3f ms, "
+                "gaps %u, frames %zu",
+                percentile(sourceIntervalsUs, 95) / 1000.0,
+                percentile(sourceIntervalsUs, 99) / 1000.0,
+                maximum(sourceIntervalsUs) / 1000.0,
+                percentile(firstPacketIntervalsUs, 95) / 1000.0,
+                percentile(firstPacketIntervalsUs, 99) / 1000.0,
+                maximum(firstPacketIntervalsUs) / 1000.0,
+                percentile(completedFrameIntervalsUs, 95) / 1000.0,
+                percentile(completedFrameIntervalsUs, 99) / 1000.0,
+                maximum(completedFrameIntervalsUs) / 1000.0,
+                percentile(reassemblyUs, 99) / 1000.0,
+                maximum(reassemblyUs) / 1000.0,
+                percentile(hostProcessingUs, 99) / 1000.0,
+                maximum(hostProcessingUs) / 1000.0,
+                percentile(decodeUs, 99) / 1000.0,
+                maximum(decodeUs) / 1000.0,
+                percentile(decodeReadyIntervalsUs, 95) / 1000.0,
+                percentile(decodeReadyIntervalsUs, 99) / 1000.0,
+                maximum(decodeReadyIntervalsUs) / 1000.0,
+                frameGaps,
+                completedFrameIntervalsUs.size() + (completedFrameIntervalsUs.empty() ? 0 : 1));
 }
 
 IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig* hwDecodeCfg, PDECODER_PARAMETERS params, int pass)
@@ -1629,6 +1787,19 @@ bool FFmpegVideoDecoder::tryInitializeNonHwAccelDecoder(PDECODER_PARAMETERS para
 
 bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
 {
+    m_PacingDiagnostics = params->pacingDiagnostics;
+    if (m_PacingDiagnostics) {
+        m_PacingDiagnosticWindowStartUs = LiGetMicroseconds();
+        size_t reserveSize = std::max(params->frameRate * 6, 360);
+        m_DiagnosticSourceIntervalsUs.reserve(reserveSize);
+        m_DiagnosticFirstPacketIntervalsUs.reserve(reserveSize);
+        m_DiagnosticCompletedFrameIntervalsUs.reserve(reserveSize);
+        m_DiagnosticReassemblyUs.reserve(reserveSize);
+        m_DiagnosticHostProcessingUs.reserve(reserveSize);
+        m_DiagnosticDecodeUs.reserve(reserveSize);
+        m_DiagnosticDecodeReadyIntervalsUs.reserve(reserveSize);
+    }
+
     // Increase log level until the first frame is decoded
     av_log_set_level(AV_LOG_DEBUG);
 
@@ -2049,8 +2220,9 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     // Restore default log level after a successful decode
                     av_log_set_level(AV_LOG_INFO);
 
-                    // Capture a frame timestamp to measuring pacing delay
-                    frame->pkt_dts = LiGetMicroseconds();
+                    // Capture a frame timestamp to measure pacing delay.
+                    uint64_t decodeReadyUs = LiGetMicroseconds();
+                    frame->pkt_dts = decodeReadyUs;
 
                     if (!m_FrameInfoQueue.isEmpty()) {
                         // Data buffers in the DU are not valid here!
@@ -2059,7 +2231,11 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         // Count time in avcodec_send_packet() and avcodec_receive_frame()
                         // as time spent decoding. Also count time spent in the decode unit
                         // queue because that's directly caused by decoder latency.
-                        m_ActiveWndVideoStats.totalDecodeTimeUs += (LiGetMicroseconds() - du.enqueueTimeUs);
+                        m_ActiveWndVideoStats.totalDecodeTimeUs += (decodeReadyUs - du.enqueueTimeUs);
+
+                        if (m_PacingDiagnostics) {
+                            recordPacingFrameDecoded(du, decodeReadyUs);
+                        }
 
                         // Store the presentation time (90 kHz timebase)
                         frame->pts = (int64_t)du.rtpTimestamp;
@@ -2132,6 +2308,10 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     // If this is the first frame, reject anything that's not an IDR frame
     if (m_FramesIn == 0 && du->frameType != FRAME_TYPE_IDR) {
         return DR_NEED_IDR;
+    }
+
+    if (m_PacingDiagnostics) {
+        recordPacingFrameReceived(du);
     }
 
     if (!m_LastFrameNumber) {

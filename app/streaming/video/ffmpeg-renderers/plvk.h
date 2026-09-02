@@ -86,6 +86,8 @@ private:
     void collectPresentationFeedback(VkSwapchainKHR swapchain);
     void resetPresentationTiming(VkSwapchainKHR swapchain);
     void logPresentationTiming(uint64_t nowNs);
+    uint64_t getPresentLeadTimeNs() const;
+    const char* getPacingModeName() const;
 #endif
 
     // The backend renderer if we're frontend-only
@@ -165,9 +167,13 @@ private:
     PFN_vkEnumerateDeviceExtensionProperties fn_vkEnumerateDeviceExtensionProperties = nullptr;
 
 #ifdef Q_OS_LINUX
+    StreamingPreferences::PacingMode m_PacingMode = StreamingPreferences::PM_FIFO;
     bool m_PresentationSyncRequested = false;
+    bool m_PresentationFeedbackRequested = false;
+    bool m_PacingDiagnostics = false;
     bool m_DisplayTimingAvailable = false;
     bool m_MissingFeedbackLogged = false;
+    int m_PresentLeadOverrideUs = -1;
     VkSwapchainKHR m_TimingSwapchain = VK_NULL_HANDLE;
     PFN_vkGetDeviceProcAddr fn_vkGetDeviceProcAddr = nullptr;
     PFN_vkGetPastPresentationTimingGOOGLE fn_vkGetPastPresentationTimingGOOGLE = nullptr;
@@ -185,7 +191,9 @@ private:
     size_t m_ClockSampleCount = 0;
     uint64_t m_TimingWindowStartNs = 0;
     uint32_t m_TimingMissedVblanks = 0;
+    uint32_t m_GuardSkippedVblanks = 0;
     std::vector<uint64_t> m_PresentationIntervalsNs;
     std::vector<uint64_t> m_PresentationErrorsNs;
+    std::vector<uint64_t> m_SubmissionMarginsNs;
 #endif
 };

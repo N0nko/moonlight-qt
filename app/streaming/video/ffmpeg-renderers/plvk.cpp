@@ -395,7 +395,7 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
     }
 
 #ifdef Q_OS_LINUX
-    if (m_PresentationSyncRequested) {
+    if (m_PresentationFeedbackRequested) {
         optionalDeviceExtensions.push_back(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
     }
 #endif
@@ -426,7 +426,7 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
                 deviceProps->deviceName);
 
 #ifdef Q_OS_LINUX
-    if (m_PresentationSyncRequested) {
+    if (m_PresentationFeedbackRequested) {
         bool displayTimingEnabled = false;
         for (int i = 0; i < m_Vulkan->num_extensions; i++) {
             if (strcmp(m_Vulkan->extensions[i], VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) == 0) {
@@ -450,11 +450,15 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
 
         if (m_DisplayTimingAvailable) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Gamescope presentation sync available (VK_GOOGLE_display_timing)");
+                        "Gamescope presentation timing available (VK_GOOGLE_display_timing)");
+        }
+        else if (m_PresentationSyncRequested) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Gamescope presentation sync unavailable; using FIFO fallback");
         }
         else {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "Gamescope presentation sync unavailable; using FIFO fallback");
+                        "Gamescope presentation diagnostics unavailable");
         }
     }
 #endif
@@ -492,7 +496,29 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
     m_MaxVideoFps = params->frameRate;
 
 #ifdef Q_OS_LINUX
-    m_PresentationSyncRequested = params->enableFramePacing;
+    m_PacingMode = params->pacingMode;
+    m_PacingDiagnostics = params->pacingDiagnostics;
+    m_PresentationSyncRequested = params->enableVsync &&
+                                  m_PacingMode != StreamingPreferences::PM_FIFO;
+    m_PresentationFeedbackRequested = m_PresentationSyncRequested || m_PacingDiagnostics;
+
+    bool leadOverrideValid = false;
+    int leadOverrideUs = qEnvironmentVariableIntValue("MOONLIGHT_PRESENT_LEAD_US",
+                                                       &leadOverrideValid);
+    if (leadOverrideValid && leadOverrideUs >= 0 && leadOverrideUs <= 5000) {
+        m_PresentLeadOverrideUs = leadOverrideUs;
+    }
+    else if (leadOverrideValid) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Ignoring MOONLIGHT_PRESENT_LEAD_US outside 0..5000");
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Vulkan pacing profile: %s, diagnostics %s%s",
+                getPacingModeName(),
+                m_PacingDiagnostics ? "enabled" : "disabled",
+                m_PacingMode != StreamingPreferences::PM_FIFO &&
+                    m_PresentLeadOverrideUs >= 0 ? " (lead override active)" : "");
 #endif
 
     unsigned int instanceExtensionCount = 0;
@@ -759,11 +785,16 @@ void PlVkRenderer::resetPresentationTiming(VkSwapchainKHR swapchain)
     m_ClockSampleCount = 0;
     m_TimingWindowStartNs = monotonicTimeNs();
     m_TimingMissedVblanks = 0;
+    m_GuardSkippedVblanks = 0;
     m_MissingFeedbackLogged = false;
     m_PresentationIntervalsNs.clear();
     m_PresentationErrorsNs.clear();
-    m_PresentationIntervalsNs.reserve(std::max(m_MaxVideoFps * 6, 360));
-    m_PresentationErrorsNs.reserve(std::max(m_MaxVideoFps * 6, 360));
+    m_SubmissionMarginsNs.clear();
+    if (m_PacingDiagnostics) {
+        m_PresentationIntervalsNs.reserve(std::max(m_MaxVideoFps * 6, 360));
+        m_PresentationErrorsNs.reserve(std::max(m_MaxVideoFps * 6, 360));
+        m_SubmissionMarginsNs.reserve(std::max(m_MaxVideoFps * 6, 360));
+    }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Gamescope presentation timing armed; waiting for first feedback");
@@ -805,7 +836,9 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
         if (m_LastActualPresentTimeNs != 0 &&
             timing.actualPresentTime > m_LastActualPresentTimeNs) {
             uint64_t interval = timing.actualPresentTime - m_LastActualPresentTimeNs;
-            m_PresentationIntervalsNs.push_back(interval);
+            if (m_PacingDiagnostics) {
+                m_PresentationIntervalsNs.push_back(interval);
+            }
 
             if (m_RefreshDurationNs == 0 &&
                 m_ClockSampleCount < m_ClockSamples.size() &&
@@ -813,7 +846,7 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
                 m_ClockSamples[m_ClockSampleCount++] = interval;
             }
 
-            if (m_RefreshDurationNs != 0) {
+            if (m_PacingDiagnostics && m_RefreshDurationNs != 0) {
                 uint64_t refreshes = (interval + m_RefreshDurationNs / 2) /
                                      m_RefreshDurationNs;
                 if (refreshes > 1) {
@@ -824,7 +857,7 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
 
         m_LastActualPresentTimeNs = timing.actualPresentTime;
 
-        if (timing.desiredPresentTime != 0) {
+        if (m_PacingDiagnostics && timing.desiredPresentTime != 0) {
             uint64_t error = timing.actualPresentTime > timing.desiredPresentTime ?
                                  timing.actualPresentTime - timing.desiredPresentTime :
                                  timing.desiredPresentTime - timing.actualPresentTime;
@@ -862,7 +895,8 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
 
 void PlVkRenderer::logPresentationTiming(uint64_t nowNs)
 {
-    if (nowNs - m_TimingWindowStartNs < 5000000000ull ||
+    if (!m_PacingDiagnostics ||
+        nowNs - m_TimingWindowStartNs < 5000000000ull ||
         m_PresentationIntervalsNs.empty()) {
         return;
     }
@@ -886,20 +920,71 @@ void PlVkRenderer::logPresentationTiming(uint64_t nowNs)
         phaseP95Ms = percentile(m_PresentationErrorsNs, 95) / 1000000.0;
     }
 
+    double marginP05Ms = 0.0;
+    double marginP50Ms = 0.0;
+    if (!m_SubmissionMarginsNs.empty()) {
+        std::sort(m_SubmissionMarginsNs.begin(), m_SubmissionMarginsNs.end());
+        marginP05Ms = percentile(m_SubmissionMarginsNs, 5) / 1000000.0;
+        marginP50Ms = percentile(m_SubmissionMarginsNs, 50) / 1000000.0;
+    }
+
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "Gamescope presentation timing: interval avg/p95/p99 %.3f/%.3f/%.3f ms, "
-                "phase p95 %.3f ms, missed %u, samples %zu",
+                "Gamescope presentation timing: mode %s, interval avg/p95/p99 "
+                "%.3f/%.3f/%.3f ms, phase p95 %.3f ms, missed %u, guard skips %u, "
+                "submit margin p05/p50 %.3f/%.3f ms, lead %.3f ms, samples %zu",
+                getPacingModeName(),
                 (double)totalIntervalNs / sortedIntervals.size() / 1000000.0,
                 percentile(sortedIntervals, 95) / 1000000.0,
                 percentile(sortedIntervals, 99) / 1000000.0,
                 phaseP95Ms,
                 m_TimingMissedVblanks,
+                m_GuardSkippedVblanks,
+                marginP05Ms,
+                marginP50Ms,
+                getPresentLeadTimeNs() / 1000000.0,
                 sortedIntervals.size());
 
     m_TimingWindowStartNs = nowNs;
     m_TimingMissedVblanks = 0;
+    m_GuardSkippedVblanks = 0;
     m_PresentationIntervalsNs.clear();
     m_PresentationErrorsNs.clear();
+    m_SubmissionMarginsNs.clear();
+}
+
+uint64_t PlVkRenderer::getPresentLeadTimeNs() const
+{
+    if (m_PacingMode == StreamingPreferences::PM_FIFO) {
+        return 0;
+    }
+
+    if (m_PresentLeadOverrideUs >= 0) {
+        return (uint64_t)m_PresentLeadOverrideUs * 1000ull;
+    }
+
+    if (m_PacingMode == StreamingPreferences::PM_SMOOTH) {
+        return 500000ull;
+    }
+
+    if (m_RefreshDurationNs == 0) {
+        return 0;
+    }
+
+    return std::min<uint64_t>(
+        std::max<uint64_t>(m_RefreshDurationNs / 8, 500000), 2000000);
+}
+
+const char* PlVkRenderer::getPacingModeName() const
+{
+    switch (m_PacingMode) {
+    case StreamingPreferences::PM_CURRENT:
+        return "current";
+    case StreamingPreferences::PM_SMOOTH:
+        return "smooth";
+    case StreamingPreferences::PM_FIFO:
+    default:
+        return "fifo";
+    }
 }
 
 void PlVkRenderer::preparePresent(VkSwapchainKHR swapchain,
@@ -930,14 +1015,43 @@ void PlVkRenderer::preparePresent(VkSwapchainKHR swapchain,
 
     uint64_t desiredPresentTime = 0;
     if (m_RefreshDurationNs != 0 && m_LastActualPresentTimeNs != 0) {
-        uint64_t leadTimeNs = std::min<uint64_t>(
-            std::max<uint64_t>(m_RefreshDurationNs / 8, 500000), 2000000);
+        uint64_t upcomingPresentTime = 0;
+        if (m_PacingDiagnostics) {
+            uint64_t elapsedNow = nowNs > m_LastActualPresentTimeNs ?
+                                      nowNs - m_LastActualPresentTimeNs : 0;
+            uint64_t upcomingRefreshes = (elapsedNow + m_RefreshDurationNs - 1) /
+                                         m_RefreshDurationNs;
+            if (upcomingRefreshes == 0) {
+                upcomingRefreshes = 1;
+            }
+            upcomingPresentTime = m_LastActualPresentTimeNs +
+                                  upcomingRefreshes * m_RefreshDurationNs;
+            if (upcomingPresentTime <= nowNs) {
+                upcomingPresentTime += m_RefreshDurationNs;
+            }
+
+            const size_t maxDiagnosticSamples = std::max(m_MaxVideoFps * 10, 600);
+            if (m_SubmissionMarginsNs.size() < maxDiagnosticSamples) {
+                m_SubmissionMarginsNs.push_back(upcomingPresentTime - nowNs);
+            }
+        }
+
+        uint64_t leadTimeNs = getPresentLeadTimeNs();
         uint64_t earliestPresentTime = nowNs + leadTimeNs;
         uint64_t elapsed = earliestPresentTime > m_LastActualPresentTimeNs ?
                                earliestPresentTime - m_LastActualPresentTimeNs : 0;
         uint64_t refreshes = (elapsed + m_RefreshDurationNs - 1) /
                              m_RefreshDurationNs;
-        desiredPresentTime = m_LastActualPresentTimeNs + refreshes * m_RefreshDurationNs;
+        uint64_t timedPresentTime = m_LastActualPresentTimeNs +
+                                    refreshes * m_RefreshDurationNs;
+
+        if (m_PresentationSyncRequested) {
+            desiredPresentTime = timedPresentTime;
+            if (m_PacingDiagnostics && desiredPresentTime > upcomingPresentTime) {
+                m_GuardSkippedVblanks += (uint32_t)(
+                    (desiredPresentTime - upcomingPresentTime) / m_RefreshDurationNs);
+            }
+        }
     }
 
     m_PresentTime.presentID = m_NextPresentId++;
