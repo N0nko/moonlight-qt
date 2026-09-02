@@ -183,6 +183,14 @@ int Pacer::renderThread(void* context)
             me->m_RenderQueueNotEmpty.wait(&me->m_FrameQueueLock);
         }
 
+        if (!me->m_Stopping && reserveFrames != 0 && me->m_FrameReservePrimed &&
+            me->m_RenderQueue.count() <= reserveFrames) {
+            if (me->m_PacingDiagnostics && queueWaitStartedUs == 0) {
+                queueWaitStartedUs = LiGetMicroseconds();
+            }
+            me->m_RenderQueueNotEmpty.wait(&me->m_FrameQueueLock, TIMER_SLACK_MS);
+        }
+
         if (me->m_Stopping) {
             // Exit this thread
             me->m_FrameQueueLock.unlock();
@@ -289,12 +297,15 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
     }
 
     const int reserveFrames = pacingReserveFrames();
-    if (!hasRenderableFrameLocked(m_PacingQueue.count(), reserveFrames)) {
+    if (m_PacingQueue.isEmpty() ||
+        (reserveFrames != 0 && m_PacingQueue.count() <= reserveFrames)) {
         // Wait for a frame to arrive or our V-sync timeout to expire
         if (!m_PacingQueueNotEmpty.wait(&m_FrameQueueLock, SDL_max(timeUntilNextVsyncMillis, TIMER_SLACK_MS) - TIMER_SLACK_MS)) {
-            // Wait timed out - unlock and bail
-            m_FrameQueueLock.unlock();
-            return;
+            // A primed reserve can bridge this timeout without missing the V-sync.
+            if (!m_FrameReservePrimed || m_PacingQueue.isEmpty()) {
+                m_FrameQueueLock.unlock();
+                return;
+            }
         }
 
         if (!hasRenderableFrameLocked(m_PacingQueue.count(), reserveFrames)) {
