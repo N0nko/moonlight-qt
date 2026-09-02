@@ -64,6 +64,10 @@ private:
 
     int pacingReserveFrames() const;
 
+    bool hasRenderableFrameLocked(int queueDepth, int reserveFrames);
+
+    void recordReserveUseLocked(int queueDepth, int reserveFrames);
+
     void recordQueueDepthLocked();
 
     void logPacingDiagnostics();
@@ -86,6 +90,7 @@ private:
     int m_MaxVideoFps;
     int m_DisplayFps;
     bool m_FrameReserveEnabled;
+    bool m_FrameReservePrimed;
     bool m_PacingDiagnostics;
     PVIDEO_STATS m_VideoStats;
     int m_RendererAttributes;
@@ -94,6 +99,7 @@ private:
 
     uint64_t m_DiagnosticWindowStartUs;
     uint32_t m_DiagnosticQueueWaits;
+    uint32_t m_DiagnosticReserveUses;
     uint32_t m_DiagnosticDroppedFrames;
     int m_DiagnosticMinQueueDepth;
     int m_DiagnosticMaxQueueDepth;
