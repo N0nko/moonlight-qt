@@ -272,7 +272,10 @@ private:
                        bool testOnly,
                        IVideoDecoder*& chosenDecoder,
                        DecoderFramePresentedCallback framePresentedCallback = nullptr,
-                       void* framePresentedContext = nullptr);
+                       void* framePresentedContext = nullptr,
+                       StreamingPreferences::PacingMode pacingMode = StreamingPreferences::PM_FIFO,
+                       bool enableFrameReserve = false,
+                       bool pacingDiagnostics = false);
 
     static
     void clStageStarting(int stage);

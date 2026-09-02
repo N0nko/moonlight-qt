@@ -64,6 +64,14 @@ public:
     };
     Q_ENUM(RendererSelection)
 
+    enum PacingMode
+    {
+        PM_FIFO,
+        PM_CURRENT,
+        PM_SMOOTH,
+    };
+    Q_ENUM(PacingMode)
+
     enum WindowMode
     {
         WM_FULLSCREEN,
@@ -181,6 +189,9 @@ public:
     Q_PROPERTY(bool absoluteMouseMode MEMBER absoluteMouseMode NOTIFY absoluteMouseModeChanged)
     Q_PROPERTY(bool absoluteTouchMode MEMBER absoluteTouchMode NOTIFY absoluteTouchModeChanged)
     Q_PROPERTY(bool framePacing MEMBER framePacing NOTIFY framePacingChanged)
+    Q_PROPERTY(PacingMode pacingMode MEMBER pacingMode NOTIFY pacingModeChanged)
+    Q_PROPERTY(bool frameReserve MEMBER frameReserve NOTIFY frameReserveChanged)
+    Q_PROPERTY(bool pacingDiagnostics MEMBER pacingDiagnostics NOTIFY pacingDiagnosticsChanged)
     Q_PROPERTY(bool connectionWarnings MEMBER connectionWarnings NOTIFY connectionWarningsChanged)
     Q_PROPERTY(bool configurationWarnings MEMBER configurationWarnings NOTIFY configurationWarningsChanged)
     Q_PROPERTY(bool richPresence MEMBER richPresence NOTIFY richPresenceChanged)
@@ -230,6 +241,9 @@ public:
     bool absoluteMouseMode;
     bool absoluteTouchMode;
     bool framePacing;
+    PacingMode pacingMode;
+    bool frameReserve;
+    bool pacingDiagnostics;
     bool connectionWarnings;
     bool configurationWarnings;
     bool richPresence;
@@ -281,6 +295,9 @@ signals:
     void uiDisplayModeChanged();
     void windowModeChanged();
     void framePacingChanged();
+    void pacingModeChanged();
+    void frameReserveChanged();
+    void pacingDiagnosticsChanged();
     void connectionWarningsChanged();
     void configurationWarningsChanged();
     void richPresenceChanged();

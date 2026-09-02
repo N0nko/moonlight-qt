@@ -46,6 +46,9 @@ typedef struct _DECODER_PARAMETERS {
     int frameRate;
     bool enableVsync;
     bool enableFramePacing;
+    StreamingPreferences::PacingMode pacingMode;
+    bool enableFrameReserve;
+    bool pacingDiagnostics;
     bool testOnly;
     DecoderFramePresentedCallback framePresentedCallback;
     void* framePresentedContext;

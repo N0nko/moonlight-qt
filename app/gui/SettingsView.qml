@@ -905,10 +905,9 @@ Flickable {
 
                     CheckBox {
                         id: framePacingCheck
+                        visible: Qt.platform.os !== "linux"
                         hoverEnabled: true
-                        text: Qt.platform.os === "linux" ?
-                                  qsTr("Gamescope frame pacing (preview)") :
-                                  qsTr("Frame pacing")
+                        text: qsTr("Frame pacing")
                         font.pointSize:  12
                         enabled: StreamingPreferences.enableVsync
                         checked: StreamingPreferences.enableVsync && StreamingPreferences.framePacing
@@ -918,9 +917,103 @@ Flickable {
                         ToolTip.delay: 1000
                         ToolTip.timeout: 5000
                         ToolTip.visible: hovered
-                        ToolTip.text: Qt.platform.os === "linux" ?
-                                              qsTr("Aligns Vulkan frames to Gamescope's presentation clock and records timing measurements. Takes effect on the next stream.") :
-                                              qsTr("Frame pacing reduces micro-stutter by delaying frames that come in too early")
+                        ToolTip.text: qsTr("Frame pacing reduces micro-stutter by delaying frames that come in too early")
+                    }
+                }
+
+                Column {
+                    visible: Qt.platform.os === "linux"
+                    width: parent.width
+                    spacing: 5
+
+                    Label {
+                        width: parent.width
+                        text: qsTr("Pacing profile")
+                        font.pointSize: 12
+                        wrapMode: Text.Wrap
+                    }
+
+                    AutoResizingComboBox {
+                        id: pacingModeComboBox
+                        enabled: StreamingPreferences.enableVsync
+                        textRole: "text"
+                        model: ListModel {
+                            id: pacingModeListModel
+                            ListElement {
+                                text: qsTr("FIFO (baseline)")
+                                val: StreamingPreferences.PM_FIFO
+                            }
+                            ListElement {
+                                text: qsTr("Current timed")
+                                val: StreamingPreferences.PM_CURRENT
+                            }
+                            ListElement {
+                                text: qsTr("Smooth timed")
+                                val: StreamingPreferences.PM_SMOOTH
+                            }
+                        }
+
+                        Component.onCompleted: {
+                            for (var i = 0; i < pacingModeListModel.count; i++) {
+                                if (pacingModeListModel.get(i).val === StreamingPreferences.pacingMode) {
+                                    currentIndex = i
+                                    break
+                                }
+                            }
+                        }
+
+                        onActivated: {
+                            StreamingPreferences.pacingMode = pacingModeListModel.get(currentIndex).val
+                        }
+
+                        hoverEnabled: true
+                        ToolTip.delay: 500
+                        ToolTip.timeout: 10000
+                        ToolTip.visible: hovered
+                        ToolTip.text: {
+                            if (pacingModeListModel.get(currentIndex).val === StreamingPreferences.PM_FIFO)
+                                return qsTr("Uses the renderer's normal FIFO scheduling as a clean baseline.")
+                            if (pacingModeListModel.get(currentIndex).val === StreamingPreferences.PM_CURRENT)
+                                return qsTr("Preserves the current Gamescope timing with its existing safety margin.")
+                            return qsTr("Uses a tighter 0.5 ms deadline margin to catch the imminent refresh without adding a frame.")
+                        }
+                    }
+
+                    CheckBox {
+                        width: parent.width
+                        enabled: StreamingPreferences.enableVsync
+                        hoverEnabled: true
+                        text: qsTr("One-frame reserve (+11 ms at 90 Hz)")
+                        font.pointSize: 12
+                        checked: StreamingPreferences.frameReserve
+                        onCheckedChanged: StreamingPreferences.frameReserve = checked
+
+                        ToolTip.delay: 500
+                        ToolTip.timeout: 10000
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Keeps one decoded frame ready to absorb short supply or decode delays. Best for local streaming; leave off for minimum WAN latency.")
+                    }
+
+                    CheckBox {
+                        width: parent.width
+                        hoverEnabled: true
+                        text: qsTr("Pacing diagnostics")
+                        font.pointSize: 12
+                        checked: StreamingPreferences.pacingDiagnostics
+                        onCheckedChanged: StreamingPreferences.pacingDiagnostics = checked
+
+                        ToolTip.delay: 500
+                        ToolTip.timeout: 10000
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Writes one compact pipeline timing summary every five seconds. Takes effect on the next stream.")
+                    }
+
+                    Label {
+                        width: parent.width
+                        font.pointSize: 9
+                        wrapMode: Text.Wrap
+                        opacity: 0.8
+                        text: qsTr("Pacing changes apply on the next stream. Refresh-rate matching remains automatic.")
                     }
                 }
 

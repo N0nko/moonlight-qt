@@ -6,6 +6,7 @@
 #include <QQueue>
 #include <QMutex>
 #include <QWaitCondition>
+#include <vector>
 
 // The maximum number of frames pacer will ever hold is:
 // - 3 frames in the pacing queue
@@ -39,7 +40,8 @@ public:
 
     void submitFrame(AVFrame* frame);
 
-    bool initialize(SDL_Window* window, int maxVideoFps, bool enablePacing);
+    bool initialize(SDL_Window* window, int maxVideoFps, bool enablePacing,
+                    bool enableFrameReserve, bool pacingDiagnostics);
 
     void signalVsync();
 
@@ -58,6 +60,14 @@ private:
 
     void dropFrameForEnqueue(QQueue<AVFrame*>& queue);
 
+    int renderReserveFrames() const;
+
+    int pacingReserveFrames() const;
+
+    void recordQueueDepthLocked();
+
+    void logPacingDiagnostics();
+
     QQueue<AVFrame*> m_RenderQueue;
     QQueue<AVFrame*> m_PacingQueue;
     QQueue<int> m_PacingQueueHistory;
@@ -75,8 +85,17 @@ private:
     IFFmpegRenderer* m_VsyncRenderer;
     int m_MaxVideoFps;
     int m_DisplayFps;
+    bool m_FrameReserveEnabled;
+    bool m_PacingDiagnostics;
     PVIDEO_STATS m_VideoStats;
     int m_RendererAttributes;
     DecoderFramePresentedCallback m_FramePresentedCallback;
     void* m_FramePresentedContext;
+
+    uint64_t m_DiagnosticWindowStartUs;
+    uint32_t m_DiagnosticQueueWaits;
+    uint32_t m_DiagnosticDroppedFrames;
+    int m_DiagnosticMinQueueDepth;
+    int m_DiagnosticMaxQueueDepth;
+    std::vector<uint64_t> m_DiagnosticQueueWaitUs;
 };
