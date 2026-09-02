@@ -44,12 +44,14 @@ Pacer::Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats,
     m_MaxVideoFps(0),
     m_DisplayFps(0),
     m_FrameReserveEnabled(false),
+    m_FrameReservePrimed(false),
     m_PacingDiagnostics(false),
     m_VideoStats(videoStats),
     m_FramePresentedCallback(framePresentedCallback),
     m_FramePresentedContext(framePresentedContext),
     m_DiagnosticWindowStartUs(0),
     m_DiagnosticQueueWaits(0),
+    m_DiagnosticReserveUses(0),
     m_DiagnosticDroppedFrames(0),
     m_DiagnosticMinQueueDepth(-1),
     m_DiagnosticMaxQueueDepth(0)
@@ -104,7 +106,9 @@ void Pacer::renderOnMainThread()
 
     m_FrameQueueLock.lock();
 
-    if (m_RenderQueue.count() > renderReserveFrames()) {
+    const int reserveFrames = renderReserveFrames();
+    if (hasRenderableFrameLocked(m_RenderQueue.count(), reserveFrames)) {
+        recordReserveUseLocked(m_RenderQueue.count(), reserveFrames);
         AVFrame* frame = m_RenderQueue.dequeue();
         m_FrameQueueLock.unlock();
 
@@ -168,9 +172,11 @@ int Pacer::renderThread(void* context)
 
         uint64_t queueWaitStartedUs = 0;
 
-        // Wait for a frame plus the configured reserve to be ready.
+        const int reserveFrames = me->renderReserveFrames();
+
+        // Prime once with the configured reserve, then spend it to bridge a late frame.
         while (!me->m_Stopping &&
-               me->m_RenderQueue.count() <= me->renderReserveFrames()) {
+               !me->hasRenderableFrameLocked(me->m_RenderQueue.count(), reserveFrames)) {
             if (me->m_PacingDiagnostics && queueWaitStartedUs == 0) {
                 queueWaitStartedUs = LiGetMicroseconds();
             }
@@ -190,13 +196,14 @@ int Pacer::renderThread(void* context)
 
         // With a reserve, keep only the newest due frame plus that reserve.
         while (me->m_FrameReserveEnabled &&
-               me->m_RenderQueue.count() > me->renderReserveFrames() + 1) {
+               me->m_RenderQueue.count() > reserveFrames + 1) {
             AVFrame* droppedFrame = me->m_RenderQueue.dequeue();
             me->m_VideoStats->pacerDroppedFrames++;
             me->m_DiagnosticDroppedFrames++;
             av_frame_free(&droppedFrame);
         }
 
+        me->recordReserveUseLocked(me->m_RenderQueue.count(), reserveFrames);
         AVFrame* frame = me->m_RenderQueue.dequeue();
         me->recordQueueDepthLocked();
         me->m_FrameQueueLock.unlock();
@@ -281,7 +288,8 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
         m_FrameQueueLock.lock();
     }
 
-    if (m_PacingQueue.count() <= pacingReserveFrames()) {
+    const int reserveFrames = pacingReserveFrames();
+    if (!hasRenderableFrameLocked(m_PacingQueue.count(), reserveFrames)) {
         // Wait for a frame to arrive or our V-sync timeout to expire
         if (!m_PacingQueueNotEmpty.wait(&m_FrameQueueLock, SDL_max(timeUntilNextVsyncMillis, TIMER_SLACK_MS) - TIMER_SLACK_MS)) {
             // Wait timed out - unlock and bail
@@ -289,7 +297,7 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
             return;
         }
 
-        if (m_PacingQueue.count() <= pacingReserveFrames()) {
+        if (!hasRenderableFrameLocked(m_PacingQueue.count(), reserveFrames)) {
             m_FrameQueueLock.unlock();
             return;
         }
@@ -301,6 +309,7 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
     }
 
     // Place the first frame on the render queue
+    recordReserveUseLocked(m_PacingQueue.count(), reserveFrames);
     enqueueFrameForRenderingAndUnlock(m_PacingQueue.dequeue());
 }
 
@@ -508,6 +517,30 @@ int Pacer::pacingReserveFrames() const
     return m_FrameReserveEnabled && m_VsyncSource != nullptr ? 1 : 0;
 }
 
+bool Pacer::hasRenderableFrameLocked(int queueDepth, int reserveFrames)
+{
+    if (queueDepth == 0) {
+        return false;
+    }
+
+    if (m_FrameReserveEnabled && !m_FrameReservePrimed && reserveFrames != 0) {
+        if (queueDepth <= reserveFrames) {
+            return false;
+        }
+        m_FrameReservePrimed = true;
+    }
+
+    return true;
+}
+
+void Pacer::recordReserveUseLocked(int queueDepth, int reserveFrames)
+{
+    if (m_PacingDiagnostics && m_FrameReservePrimed && reserveFrames != 0 &&
+        queueDepth <= reserveFrames) {
+        m_DiagnosticReserveUses++;
+    }
+}
+
 void Pacer::recordQueueDepthLocked()
 {
     if (!m_PacingDiagnostics) {
@@ -534,6 +567,7 @@ void Pacer::logPacingDiagnostics()
 
     std::vector<uint64_t> queueWaitUs;
     uint32_t queueWaits;
+    uint32_t reserveUses;
     uint32_t droppedFrames;
     int minQueueDepth;
     int maxQueueDepth;
@@ -541,10 +575,12 @@ void Pacer::logPacingDiagnostics()
     m_FrameQueueLock.lock();
     queueWaitUs.swap(m_DiagnosticQueueWaitUs);
     queueWaits = m_DiagnosticQueueWaits;
+    reserveUses = m_DiagnosticReserveUses;
     droppedFrames = m_DiagnosticDroppedFrames;
     minQueueDepth = m_DiagnosticMinQueueDepth;
     maxQueueDepth = m_DiagnosticMaxQueueDepth;
     m_DiagnosticQueueWaits = 0;
+    m_DiagnosticReserveUses = 0;
     m_DiagnosticDroppedFrames = 0;
     m_DiagnosticMinQueueDepth = -1;
     m_DiagnosticMaxQueueDepth = 0;
@@ -561,7 +597,7 @@ void Pacer::logPacingDiagnostics()
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Pacing queue timing: reserve %d, waits %u, wait p95/p99/max "
-                "%.3f/%.3f/%.3f ms, depth min/max %d/%d, dropped %u",
+                "%.3f/%.3f/%.3f ms, depth min/max %d/%d, reserve uses %u, dropped %u",
                 m_FrameReserveEnabled ? 1 : 0,
                 queueWaits,
                 percentile(95) / 1000.0,
@@ -569,6 +605,7 @@ void Pacer::logPacingDiagnostics()
                 queueWaitUs.empty() ? 0.0 : queueWaitUs.back() / 1000.0,
                 minQueueDepth < 0 ? 0 : minQueueDepth,
                 maxQueueDepth,
+                reserveUses,
                 droppedFrames);
 }
 
