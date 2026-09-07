@@ -101,6 +101,7 @@ private:
     SourceTimeline m_SourceTimeline;
     uint32_t m_SourceHolds = 0;
     uint32_t m_SourceResets = 0;
+    uint32_t m_SourceDeadlineMisses = 0;
     uint64_t m_SourceMaxQueueAgeUs = 0;
     uint64_t m_SourceReserveUs = 0;
     PVIDEO_STATS m_VideoStats;
