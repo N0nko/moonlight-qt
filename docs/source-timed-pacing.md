@@ -40,6 +40,27 @@ statistics. Source queue age is measured after decoding, not input-to-photon tim
 Keep disabled unless live A/B results justify using it. One refresh of reserve
 cannot hide missing source frames, long outages, or a compositor deadline miss.
 
+### September 7 live result: keep disabled
+
+Build abbe83c (pacing.11), Steam Deck 90 Hz, 800p90 AV1 10-bit HDR / VAAPI,
+200 Mbps LAN, 90 FPS pendulum. Four one-minute measurements, each after stream
+readiness plus 12 seconds warmup, in existing/source/source/existing order:
+
+| Mode | Presentation gap slots per minute | Target-late slots per present |
+| --- | --- | --- |
+| Existing Smooth | 0, 1 | 1.967, 1.987 |
+| Source-timed Smooth | 13, 8 | 1.000, 1.071 |
+
+Source-timed decoded queue age stayed below 15.9 ms. Source intervals reached
+27-28 ms in all runs; measured decode maxima were 1.3-2.5 ms. The corrected
+display validation chose 90 Hz despite the API retaining its 60 Hz default.
+
+No smoothness improvement was demonstrated. Lower requested-to-actual lateness
+is not proof of lower input-to-photon latency: target selection differs, and
+baseline decoded queue age was not instrumented. There was no physical latency,
+power, hibernation, long-session, or real low-rate-stream comparison. Keep this
+opt-in experiment OFF by default and retain existing Smooth for current use.
+
 ## Deferred input issue
 
 Settings Back sometimes returns the picture without working controls. Scripted
