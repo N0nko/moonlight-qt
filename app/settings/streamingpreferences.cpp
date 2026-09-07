@@ -180,7 +180,7 @@ void StreamingPreferences::reload()
         savedPacingMode = framePacing ? PM_CURRENT : PM_FIFO;
     }
     pacingMode = static_cast<PacingMode>(savedPacingMode);
-    frameReserve = settings.value(SER_FRAMERESERVE, false).toBool();
+    frameReserve = pacingMode == PM_SMOOTH;
     pacingDiagnostics = settings.value(SER_PACINGDIAGNOSTICS, false).toBool();
     connectionWarnings = settings.value(SER_CONNWARNINGS, true).toBool();
     configurationWarnings = settings.value(SER_CONFWARNINGS, true).toBool();

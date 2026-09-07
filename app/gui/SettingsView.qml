@@ -928,27 +928,28 @@ Flickable {
 
                     Label {
                         width: parent.width
-                        text: qsTr("Pacing profile")
+                        text: qsTr("Frame pacing")
                         font.pointSize: 12
                         wrapMode: Text.Wrap
                     }
 
                     AutoResizingComboBox {
                         id: pacingModeComboBox
+                        width: parent.width
                         enabled: StreamingPreferences.enableVsync
                         textRole: "text"
                         model: ListModel {
                             id: pacingModeListModel
                             ListElement {
-                                text: qsTr("FIFO (baseline)")
+                                text: qsTr("Standard")
                                 val: StreamingPreferences.PM_FIFO
                             }
                             ListElement {
-                                text: qsTr("Current timed")
+                                text: qsTr("Low latency")
                                 val: StreamingPreferences.PM_CURRENT
                             }
                             ListElement {
-                                text: qsTr("Smooth timed")
+                                text: qsTr("Smooth")
                                 val: StreamingPreferences.PM_SMOOTH
                             }
                         }
@@ -964,6 +965,7 @@ Flickable {
 
                         onActivated: {
                             StreamingPreferences.pacingMode = pacingModeListModel.get(currentIndex).val
+                            StreamingPreferences.frameReserve = StreamingPreferences.pacingMode === StreamingPreferences.PM_SMOOTH
                         }
 
                         hoverEnabled: true
@@ -972,26 +974,11 @@ Flickable {
                         ToolTip.visible: hovered
                         ToolTip.text: {
                             if (pacingModeListModel.get(currentIndex).val === StreamingPreferences.PM_FIFO)
-                                return qsTr("Uses the renderer's normal FIFO scheduling as a clean baseline.")
+                                return qsTr("Normal FIFO presentation. The compatibility baseline, with no extra jitter buffer.")
                             if (pacingModeListModel.get(currentIndex).val === StreamingPreferences.PM_CURRENT)
-                                return qsTr("Preserves the current Gamescope timing with its existing safety margin.")
-                            return qsTr("Uses a tighter 0.5 ms deadline margin to catch the imminent refresh without adding a frame.")
+                                return qsTr("Display-timed presentation with no extra jitter buffer. Prioritizes responsiveness.")
+                            return qsTr("Display-timed presentation with an adaptive one-frame reserve to absorb short delays. Adds about one frame when the reserve is full.")
                         }
-                    }
-
-                    CheckBox {
-                        width: parent.width
-                        enabled: StreamingPreferences.enableVsync
-                        hoverEnabled: true
-                        text: qsTr("One-frame reserve (+11 ms at 90 Hz)")
-                        font.pointSize: 12
-                        checked: StreamingPreferences.frameReserve
-                        onCheckedChanged: StreamingPreferences.frameReserve = checked
-
-                        ToolTip.delay: 500
-                        ToolTip.timeout: 10000
-                        ToolTip.visible: hovered
-                        ToolTip.text: qsTr("Keeps one decoded frame ready to absorb short supply or decode delays. Best for local streaming; leave off for minimum WAN latency.")
                     }
 
                     CheckBox {
