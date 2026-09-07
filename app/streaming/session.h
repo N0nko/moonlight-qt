@@ -276,7 +276,8 @@ private:
                        void* framePresentedContext = nullptr,
                        StreamingPreferences::PacingMode pacingMode = StreamingPreferences::PM_FIFO,
                        bool enableFrameReserve = false,
-                       bool pacingDiagnostics = false);
+                       bool pacingDiagnostics = false,
+                       bool enableSourceTiming = false);
 
     static
     void clStageStarting(int stage);

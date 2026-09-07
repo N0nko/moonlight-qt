@@ -42,6 +42,7 @@
 #define SER_PACINGMODE "pacingmode"
 #define SER_FRAMERESERVE "framereserve"
 #define SER_PACINGDIAGNOSTICS "pacingdiagnostics"
+#define SER_SOURCETIMING "sourcetiming"
 #define SER_CONNWARNINGS "connwarnings"
 #define SER_CONFWARNINGS "confwarnings"
 #define SER_UIDISPLAYMODE "uidisplaymode"
@@ -182,6 +183,7 @@ void StreamingPreferences::reload()
     pacingMode = static_cast<PacingMode>(savedPacingMode);
     frameReserve = pacingMode == PM_SMOOTH;
     pacingDiagnostics = settings.value(SER_PACINGDIAGNOSTICS, false).toBool();
+    sourceTiming = settings.value(SER_SOURCETIMING, false).toBool();
     connectionWarnings = settings.value(SER_CONNWARNINGS, true).toBool();
     configurationWarnings = settings.value(SER_CONFWARNINGS, true).toBool();
     richPresence = settings.value(SER_RICHPRESENCE, true).toBool();
@@ -394,6 +396,7 @@ void StreamingPreferences::save()
 #endif
     settings.setValue(SER_FRAMERESERVE, frameReserve);
     settings.setValue(SER_PACINGDIAGNOSTICS, pacingDiagnostics);
+    settings.setValue(SER_SOURCETIMING, sourceTiming);
     settings.setValue(SER_CONNWARNINGS, connectionWarnings);
     settings.setValue(SER_CONFWARNINGS, configurationWarnings);
     settings.setValue(SER_RICHPRESENCE, richPresence);

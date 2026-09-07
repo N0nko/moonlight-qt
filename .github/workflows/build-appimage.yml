@@ -163,7 +163,10 @@ jobs:
           c++ -std=c++17 -Wall -Wextra -Werror \
             tests/deckprotocol_test.cpp \
             -o /tmp/deckprotocol-test
-          /tmp/deckprotocol-test
+            /tmp/deckprotocol-test
+            c++ -std=c++17 -Wall -Wextra -Werror \
+              tests/sourcetimeline_test.cpp -o /tmp/sourcetimeline-test
+            /tmp/sourcetimeline-test
 
       - name: Build Binaries
         run: |

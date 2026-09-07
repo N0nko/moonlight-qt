@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <vector>
+#include <QDeadlineTimer>
 
 // Limit the number of queued frames to prevent excessive memory consumption
 // if the V-Sync source or renderer is blocked for a while. It's important
@@ -170,6 +171,16 @@ int Pacer::renderThread(void* context)
         // the not empty condition
         me->m_FrameQueueLock.lock();
 
+        if (me->m_SourceTimingEnabled) {
+            AVFrame* frame = me->takeSourceFrameLocked();
+            me->m_FrameQueueLock.unlock();
+            if (frame == nullptr) {
+                break;
+            }
+            me->renderFrame(frame);
+            continue;
+        }
+
         uint64_t queueWaitStartedUs = 0;
 
         const int reserveFrames = me->renderReserveFrames();
@@ -224,6 +235,71 @@ int Pacer::renderThread(void* context)
     me->m_VsyncRenderer->cleanupRenderContext();
 
     return 0;
+}
+
+AVFrame* Pacer::takeSourceFrameLocked()
+{
+    while (!m_Stopping) {
+        while (!m_Stopping && m_RenderQueue.isEmpty()) {
+            m_RenderQueueNotEmpty.wait(&m_FrameQueueLock);
+        }
+        if (m_Stopping) {
+            return nullptr;
+        }
+
+        IFFmpegRenderer::PresentationSlot slot = {};
+        const bool timed = m_SourceTimingEnabled && m_VsyncRenderer->getSourcePresentationSlot(slot);
+        if (timed != m_SourceTimingActive) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Source timing %s",
+                        timed ? "active" : "feedback unavailable; latest-frame fallback");
+            m_SourceTimingActive = timed;
+        }
+
+        int selected = m_RenderQueue.count() - 1;
+        if (timed) {
+            // Wake on arrivals or shutdown, but latch only at the chosen deadline.
+            uint64_t nowUs = LiGetMicroseconds();
+            while (!m_Stopping && nowUs < slot.deadlineUs) {
+                QDeadlineTimer deadline(Qt::PreciseTimer);
+                deadline.setPreciseRemainingTime(0, (slot.deadlineUs - nowUs) * 1000,
+                                                 Qt::PreciseTimer);
+                m_RenderQueueNotEmpty.wait(&m_FrameQueueLock, deadline);
+                nowUs = LiGetMicroseconds();
+            }
+            if (m_Stopping) {
+                return nullptr;
+            }
+            if (!m_SourceTimingEnabled) {
+                continue;
+            }
+            uint32_t timestamps[MAX_QUEUED_FRAMES] = {};
+            for (int i = 0; i < m_RenderQueue.count(); ++i) {
+                timestamps[i] = static_cast<uint32_t>(m_RenderQueue[i]->pts);
+            }
+            m_SourceReserveUs = slot.refreshUs;
+            selected = m_SourceTimeline.newestDue(timestamps, m_RenderQueue.count(),
+                                                  slot.presentUs, slot.refreshUs);
+            if (selected < 0) {
+                ++m_SourceHolds;
+                continue;
+            }
+        }
+
+        while (selected-- > 0) {
+            AVFrame* stale = m_RenderQueue.dequeue();
+            av_frame_free(&stale);
+            ++m_VideoStats->pacerDroppedFrames;
+            ++m_DiagnosticDroppedFrames;
+        }
+        AVFrame* frame = m_RenderQueue.dequeue();
+        if (m_PacingDiagnostics) {
+            m_SourceMaxQueueAgeUs = std::max(m_SourceMaxQueueAgeUs,
+                LiGetMicroseconds() - static_cast<uint64_t>(frame->pkt_dts));
+        }
+        recordQueueDepthLocked();
+        return frame;
+    }
+    return nullptr;
 }
 
 void Pacer::enqueueFrameForRenderingAndUnlock(AVFrame *frame)
@@ -325,7 +401,8 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
 }
 
 bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing,
-                       bool enableFrameReserve, bool pacingDiagnostics)
+                       bool enableFrameReserve, bool pacingDiagnostics,
+                       bool enableSourceTiming)
 {
     m_MaxVideoFps = maxVideoFps;
     m_DisplayFps = StreamUtils::getDisplayRefreshRate(window);
@@ -350,6 +427,8 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing,
     }
 
     bool rendererPacing = m_RendererAttributes & RENDERER_ATTRIBUTE_INTERNAL_PACING;
+    m_SourceTimingEnabled = enableSourceTiming && enablePacing && rendererPacing &&
+                            m_VsyncRenderer->isRenderThreadSupported();
     if (enablePacing && !rendererPacing) {
         SDL_SysWMinfo info;
         SDL_VERSION(&info.version);
@@ -422,6 +501,10 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing,
                 m_FrameReserveEnabled ? "enabled" : "disabled",
                 m_FrameReserveEnabled ? 1 : 0,
                 m_PacingDiagnostics ? "enabled" : "disabled");
+    if (enableSourceTiming) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Source-timed Smooth %s",
+                    m_SourceTimingEnabled ? "armed; waiting for display feedback" : "unavailable; using existing pacing");
+    }
 
     return true;
 }
@@ -489,7 +572,7 @@ void Pacer::renderFrame(AVFrame* frame)
     }
 
     // Catch up if we're several frames ahead
-    while (m_RenderQueue.count() > frameDropTarget) {
+    while (!m_SourceTimingEnabled && m_RenderQueue.count() > frameDropTarget) {
         AVFrame* frame = m_RenderQueue.dequeue();
         m_DiagnosticDroppedFrames++;
 
@@ -580,6 +663,10 @@ void Pacer::logPacingDiagnostics()
     uint32_t queueWaits;
     uint32_t reserveUses;
     uint32_t droppedFrames;
+    uint32_t sourceHolds;
+    uint32_t sourceResets;
+    uint64_t sourceMaxAgeUs;
+    uint64_t sourceReserveUs;
     int minQueueDepth;
     int maxQueueDepth;
 
@@ -588,6 +675,12 @@ void Pacer::logPacingDiagnostics()
     queueWaits = m_DiagnosticQueueWaits;
     reserveUses = m_DiagnosticReserveUses;
     droppedFrames = m_DiagnosticDroppedFrames;
+    sourceHolds = m_SourceHolds;
+    sourceResets = m_SourceResets;
+    sourceMaxAgeUs = m_SourceMaxQueueAgeUs;
+    sourceReserveUs = m_SourceReserveUs;
+    m_SourceHolds = m_SourceResets = 0;
+    m_SourceMaxQueueAgeUs = 0;
     minQueueDepth = m_DiagnosticMinQueueDepth;
     maxQueueDepth = m_DiagnosticMaxQueueDepth;
     m_DiagnosticQueueWaits = 0;
@@ -618,6 +711,11 @@ void Pacer::logPacingDiagnostics()
                 maxQueueDepth,
                 reserveUses,
                 droppedFrames);
+    if (m_SourceTimingEnabled) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Source pacing: reserve %.3f ms, holds %u, resets %u, max decoded queue age %.3f ms",
+                    sourceReserveUs / 1000.0, sourceHolds, sourceResets, sourceMaxAgeUs / 1000.0);
+    }
 }
 
 void Pacer::submitFrame(AVFrame* frame)
@@ -627,6 +725,29 @@ void Pacer::submitFrame(AVFrame* frame)
 
     // Queue the frame and possibly wake up the render thread
     m_FrameQueueLock.lock();
+    if (m_SourceTimingEnabled) {
+        if (frame->pts == AV_NOPTS_VALUE) {
+            m_SourceTimingEnabled = false;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Missing source timestamp; using existing pacing");
+        }
+        else {
+            auto observation = m_SourceTimeline.observe(static_cast<uint32_t>(frame->pts),
+                                                       static_cast<uint64_t>(frame->pkt_dts));
+            if (observation == SourceTimeline::Observation::Duplicate) {
+                av_frame_free(&frame);
+                m_FrameQueueLock.unlock();
+                return;
+            }
+            if (observation == SourceTimeline::Observation::Reset) {
+                ++m_SourceResets;
+                while (!m_RenderQueue.isEmpty()) {
+                    AVFrame* stale = m_RenderQueue.dequeue();
+                    av_frame_free(&stale);
+                    ++m_VideoStats->pacerDroppedFrames;
+                }
+            }
+        }
+    }
     if (m_VsyncSource != nullptr) {
         dropFrameForEnqueue(m_PacingQueue);
         m_PacingQueue.enqueue(frame);

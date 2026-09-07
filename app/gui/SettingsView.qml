@@ -984,6 +984,21 @@ Flickable {
                     CheckBox {
                         width: parent.width
                         hoverEnabled: true
+                        text: qsTr("Source-timed Smooth (experimental)")
+                        font.pointSize: 12
+                        enabled: StreamingPreferences.pacingMode === StreamingPreferences.PM_SMOOTH
+                        checked: StreamingPreferences.sourceTiming
+                        onCheckedChanged: StreamingPreferences.sourceTiming = checked
+
+                        ToolTip.delay: 500
+                        ToolTip.timeout: 10000
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Selects frames by source timestamp with a one-refresh time reserve. Requires Gamescope presentation feedback. Off keeps the existing Smooth implementation. Applies on the next stream.")
+                    }
+
+                    CheckBox {
+                        width: parent.width
+                        hoverEnabled: true
                         text: qsTr("Pacing diagnostics")
                         font.pointSize: 12
                         checked: StreamingPreferences.pacingDiagnostics
