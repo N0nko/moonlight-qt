@@ -12,6 +12,9 @@ restores the prior Smooth implementation; Standard and Low latency are unchanged
   refresh of reserve. Do not wait for a second source frame just to prime a buffer.
 - Use vkGetRefreshCycleDurationGOOGLE, not the spacing of sparse source presents,
   to determine panel refresh. Never equate 30 FPS delivery to a 30 Hz panel.
+- Corroborate the API period against the SDL display mode. Live testing found a
+  stale 60 Hz API default on the 90 Hz Deck. On disagreement, validate 32 actual
+  intervals normalized by display scans before activating source timing.
 - Convert MONOTONIC presentation targets to the local RAW decode-clock domain using
   bracketed samples. Do not compare absolute values from the two clocks.
 - Drop superseded candidates; wait without synthetic presents when nothing is due.
