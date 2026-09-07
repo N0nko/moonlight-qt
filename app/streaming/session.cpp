@@ -2154,13 +2154,10 @@ bool Session::focusStreamWindow()
     SDL_VERSION(&info.version);
     if (SDL_GetWindowWMInfo(m_Window, &info) &&
             info.subsystem == SDL_SYSWM_X11) {
-        Display* display = XOpenDisplay(gamescopeControlDisplay().constData());
-        if (display != nullptr) {
+        const auto releaseFocusPin = [](Display* display) {
             const Atom focusAtom = XInternAtom(
                         display, "GAMESCOPECTRL_BASELAYER_WINDOW", True);
             if (focusAtom != 0) {
-                // Release the legacy pin: it overrides Steam menus as well as
-                // the settings window. Normal activation lets Steam arbitrate.
                 const unsigned long nativeWindow = 0;
                 XChangeProperty(display,
                                 DefaultRootWindow(display),
@@ -2172,6 +2169,14 @@ bool Session::focusStreamWindow()
                                 1);
                 XFlush(display);
             }
+        };
+
+        // Gamescope's control root selects the picture; the app's Xwayland
+        // root also selects input. Release both before ordinary activation.
+        releaseFocusPin(info.info.x11.display);
+        Display* display = XOpenDisplay(gamescopeControlDisplay().constData());
+        if (display != nullptr) {
+            releaseFocusPin(display);
             XCloseDisplay(display);
         }
 
