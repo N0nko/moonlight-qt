@@ -194,6 +194,15 @@ public:
         // Don't wait by default
     }
 
+    struct PresentationSlot {
+        uint64_t presentUs;
+        uint64_t deadlineUs;
+        uint64_t refreshUs;
+    };
+
+    // Times are in LiGetMicroseconds()'s clock domain. Render-thread only.
+    virtual bool getSourcePresentationSlot(PresentationSlot&) { return false; }
+
     // Called on the same thread as renderFrame() during destruction of the renderer
     virtual void cleanupRenderContext() {
         // Nothing

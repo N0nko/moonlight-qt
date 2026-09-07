@@ -2,11 +2,13 @@
 
 #include "../../decoder.h"
 #include "../renderer.h"
+#include "sourcetimeline.h"
 
 #include <QQueue>
 #include <QMutex>
 #include <QWaitCondition>
 #include <vector>
+#include <atomic>
 
 // The maximum number of frames pacer will ever hold is:
 // - 3 frames in the pacing queue
@@ -41,7 +43,8 @@ public:
     void submitFrame(AVFrame* frame);
 
     bool initialize(SDL_Window* window, int maxVideoFps, bool enablePacing,
-                    bool enableFrameReserve, bool pacingDiagnostics);
+                    bool enableFrameReserve, bool pacingDiagnostics,
+                    bool enableSourceTiming);
 
     void signalVsync();
 
@@ -71,6 +74,7 @@ private:
     void recordQueueDepthLocked();
 
     void logPacingDiagnostics();
+    AVFrame* takeSourceFrameLocked();
 
     QQueue<AVFrame*> m_RenderQueue;
     QQueue<AVFrame*> m_PacingQueue;
@@ -83,7 +87,7 @@ private:
     SDL_Thread* m_RenderThread;
     SDL_Thread* m_VsyncThread;
     AVFrame* m_DeferredFreeFrame;
-    bool m_Stopping;
+    std::atomic_bool m_Stopping;
 
     IVsyncSource* m_VsyncSource;
     IFFmpegRenderer* m_VsyncRenderer;
@@ -92,6 +96,13 @@ private:
     bool m_FrameReserveEnabled;
     bool m_FrameReservePrimed;
     bool m_PacingDiagnostics;
+    std::atomic_bool m_SourceTimingEnabled{false};
+    bool m_SourceTimingActive = false;
+    SourceTimeline m_SourceTimeline;
+    uint32_t m_SourceHolds = 0;
+    uint32_t m_SourceResets = 0;
+    uint64_t m_SourceMaxQueueAgeUs = 0;
+    uint64_t m_SourceReserveUs = 0;
     PVIDEO_STATS m_VideoStats;
     int m_RendererAttributes;
     DecoderFramePresentedCallback m_FramePresentedCallback;

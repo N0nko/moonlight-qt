@@ -513,7 +513,8 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
         if (!m_Pacer->initialize(params->window, params->frameRate,
                                  params->enableFramePacing || (params->enableVsync && (m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_FORCE_PACING)),
                                  params->enableFrameReserve,
-                                 params->pacingDiagnostics)) {
+                                 params->pacingDiagnostics,
+                                 params->enableSourceTiming)) {
             return false;
         }
     }
@@ -2223,6 +2224,7 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     // Capture a frame timestamp to measure pacing delay.
                     uint64_t decodeReadyUs = LiGetMicroseconds();
                     frame->pkt_dts = decodeReadyUs;
+                    frame->pts = AV_NOPTS_VALUE;
 
                     if (!m_FrameInfoQueue.isEmpty()) {
                         // Data buffers in the DU are not valid here!

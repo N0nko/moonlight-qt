@@ -47,6 +47,7 @@ public:
     virtual void renderFrame(AVFrame* frame) override;
     virtual bool testRenderFrame(AVFrame* frame) override;
     virtual void waitToRender() override;
+    virtual bool getSourcePresentationSlot(PresentationSlot& slot) override;
     virtual void cleanupRenderContext() override;
     virtual void notifyOverlayUpdated(Overlay::OverlayType) override;
     virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO) override;
@@ -171,12 +172,18 @@ private:
     bool m_PresentationSyncRequested = false;
     bool m_PresentationFeedbackRequested = false;
     bool m_PacingDiagnostics = false;
+    bool m_SourceTimingEnabled = false;
+    bool m_SourceRefreshKnown = false;
+    uint64_t m_LastSourceSlotNs = 0;
+    uint64_t m_SourcePresentNs = 0;
+    uint32_t m_TargetLateSlots = 0;
     bool m_DisplayTimingAvailable = false;
     bool m_MissingFeedbackLogged = false;
     int m_PresentLeadOverrideUs = -1;
     VkSwapchainKHR m_TimingSwapchain = VK_NULL_HANDLE;
     PFN_vkGetDeviceProcAddr fn_vkGetDeviceProcAddr = nullptr;
     PFN_vkGetPastPresentationTimingGOOGLE fn_vkGetPastPresentationTimingGOOGLE = nullptr;
+    PFN_vkGetRefreshCycleDurationGOOGLE fn_vkGetRefreshCycleDurationGOOGLE = nullptr;
     VkPresentTimeGOOGLE m_PresentTime = {};
     VkPresentTimesInfoGOOGLE m_PresentTimesInfo = {
         VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE

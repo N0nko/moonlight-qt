@@ -498,6 +498,7 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
 #ifdef Q_OS_LINUX
     m_PacingMode = params->pacingMode;
     m_PacingDiagnostics = params->pacingDiagnostics;
+    m_SourceTimingEnabled = params->enableSourceTiming;
     m_PresentationSyncRequested = params->enableVsync &&
                                   m_PacingMode != StreamingPreferences::PM_FIFO;
     m_PresentationFeedbackRequested = m_PresentationSyncRequested || m_PacingDiagnostics;
@@ -782,6 +783,9 @@ void PlVkRenderer::resetPresentationTiming(VkSwapchainKHR swapchain)
     m_FeedbackPollCountdown = 0;
     m_RefreshDurationNs = 0;
     m_LastActualPresentTimeNs = 0;
+    m_LastSourceSlotNs = m_SourcePresentNs = 0;
+    m_SourceRefreshKnown = false;
+    m_TargetLateSlots = 0;
     m_ClockSampleCount = 0;
     m_TimingWindowStartNs = monotonicTimeNs();
     m_TimingMissedVblanks = 0;
@@ -858,6 +862,11 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
         m_LastActualPresentTimeNs = timing.actualPresentTime;
 
         if (m_PacingDiagnostics && timing.desiredPresentTime != 0) {
+            if (m_RefreshDurationNs != 0 && timing.actualPresentTime > timing.desiredPresentTime) {
+                m_TargetLateSlots += static_cast<uint32_t>(
+                    (timing.actualPresentTime - timing.desiredPresentTime + m_RefreshDurationNs / 2) /
+                    m_RefreshDurationNs);
+            }
             uint64_t error = timing.actualPresentTime > timing.desiredPresentTime ?
                                  timing.actualPresentTime - timing.desiredPresentTime :
                                  timing.desiredPresentTime - timing.actualPresentTime;
@@ -871,6 +880,25 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
 
     if (receivedNewFeedback) {
         m_PresentsWithoutFeedback = 0;
+
+        if (m_SourceTimingEnabled) {
+            if (fn_vkGetRefreshCycleDurationGOOGLE == nullptr) {
+                fn_vkGetRefreshCycleDurationGOOGLE = reinterpret_cast<PFN_vkGetRefreshCycleDurationGOOGLE>(
+                    fn_vkGetDeviceProcAddr(m_Vulkan->device, "vkGetRefreshCycleDurationGOOGLE"));
+            }
+            VkRefreshCycleDurationGOOGLE cycle = {};
+            if (fn_vkGetRefreshCycleDurationGOOGLE != nullptr &&
+                fn_vkGetRefreshCycleDurationGOOGLE(m_Vulkan->device, swapchain, &cycle) == VK_SUCCESS &&
+                cycle.refreshDuration >= 4000000 && cycle.refreshDuration <= 40000000) {
+                if (m_RefreshDurationNs == 0) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "Gamescope presentation sync active: reported %.3f Hz (%.3f ms)",
+                                1000000000.0 / cycle.refreshDuration, cycle.refreshDuration / 1000000.0);
+                }
+                m_RefreshDurationNs = cycle.refreshDuration;
+                m_SourceRefreshKnown = true;
+            }
+        }
 
         if (m_RefreshDurationNs == 0 &&
             m_ClockSampleCount == m_ClockSamples.size()) {
@@ -930,7 +958,8 @@ void PlVkRenderer::logPresentationTiming(uint64_t nowNs)
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Gamescope presentation timing: mode %s, interval avg/p95/p99 "
-                "%.3f/%.3f/%.3f ms, phase p95 %.3f ms, missed %u, guard skips %u, "
+                "%.3f/%.3f/%.3f ms, phase p95 %.3f ms, gap slots %u, guard skips %u, "
+                "target late slots %u, "
                 "submit margin p05/p50 %.3f/%.3f ms, lead %.3f ms, samples %zu",
                 getPacingModeName(),
                 (double)totalIntervalNs / sortedIntervals.size() / 1000000.0,
@@ -939,6 +968,7 @@ void PlVkRenderer::logPresentationTiming(uint64_t nowNs)
                 phaseP95Ms,
                 m_TimingMissedVblanks,
                 m_GuardSkippedVblanks,
+                m_TargetLateSlots,
                 marginP05Ms,
                 marginP50Ms,
                 getPresentLeadTimeNs() / 1000000.0,
@@ -947,6 +977,7 @@ void PlVkRenderer::logPresentationTiming(uint64_t nowNs)
     m_TimingWindowStartNs = nowNs;
     m_TimingMissedVblanks = 0;
     m_GuardSkippedVblanks = 0;
+    m_TargetLateSlots = 0;
     m_PresentationIntervalsNs.clear();
     m_PresentationErrorsNs.clear();
     m_SubmissionMarginsNs.clear();
@@ -1054,6 +1085,11 @@ void PlVkRenderer::preparePresent(VkSwapchainKHR swapchain,
         }
     }
 
+    if (m_SourcePresentNs != 0) {
+        // Preserve the chosen slot, including a missed deadline, for honest feedback.
+        desiredPresentTime = m_SourcePresentNs;
+        m_SourcePresentNs = 0;
+    }
     m_PresentTime.presentID = m_NextPresentId++;
     if (m_NextPresentId == 0) {
         m_NextPresentId = 1;
@@ -1695,6 +1731,44 @@ int PlVkRenderer::getRendererAttributes()
     }
 #endif
     return attributes;
+}
+
+bool PlVkRenderer::getSourcePresentationSlot(PresentationSlot& slot)
+{
+#ifdef Q_OS_LINUX
+    const uint64_t beforeUs = LiGetMicroseconds();
+    const uint64_t nowNs = monotonicTimeNs();
+    const uint64_t afterUs = LiGetMicroseconds();
+    if (!m_SourceTimingEnabled || !m_SourceRefreshKnown || !m_HasPendingSwapchainFrame ||
+        afterUs - beforeUs > 250 ||
+        !m_DisplayTimingAvailable || m_RefreshDurationNs < 4000000 ||
+        m_RefreshDurationNs > 40000000 || m_LastActualPresentTimeNs == 0 ||
+        nowNs < m_LastActualPresentTimeNs || nowNs - m_LastActualPresentTimeNs > 500000000) {
+        m_SourcePresentNs = 0;
+        return false;
+    }
+
+    // Latch before rendering, leaving more time than the post-render present guard.
+    const uint64_t leadNs = std::max<uint64_t>(getPresentLeadTimeNs(), 2000000);
+    const uint64_t elapsed = nowNs + leadNs - m_LastActualPresentTimeNs;
+    uint64_t targetNs = m_LastActualPresentTimeNs +
+        ((elapsed + m_RefreshDurationNs - 1) / m_RefreshDurationNs) * m_RefreshDurationNs;
+    if (targetNs <= m_LastSourceSlotNs) {
+        targetNs += ((m_LastSourceSlotNs - targetNs) / m_RefreshDurationNs + 1) * m_RefreshDurationNs;
+    }
+    m_LastSourceSlotNs = m_SourcePresentNs = targetNs;
+
+    // RAW and MONOTONIC have different epochs/rates. Convert relative durations
+    // with a fresh local sample, never compare their absolute timestamps.
+    const uint64_t localUs = beforeUs + (afterUs - beforeUs) / 2;
+    slot.presentUs = localUs + (targetNs - nowNs) / 1000;
+    slot.deadlineUs = slot.presentUs - leadNs / 1000;
+    slot.refreshUs = m_RefreshDurationNs / 1000;
+    return true;
+#else
+    Q_UNUSED(slot);
+    return false;
+#endif
 }
 
 int PlVkRenderer::getDecoderColorspace()

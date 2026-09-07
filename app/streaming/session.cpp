@@ -490,7 +490,8 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
                             void* framePresentedContext,
                             StreamingPreferences::PacingMode pacingMode,
                             bool enableFrameReserve,
-                            bool pacingDiagnostics)
+                            bool pacingDiagnostics,
+                            bool enableSourceTiming)
 {
     DECODER_PARAMETERS params;
 
@@ -509,6 +510,7 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
     params.pacingMode = pacingMode;
     params.enableFrameReserve = enableFrameReserve;
     params.pacingDiagnostics = pacingDiagnostics;
+    params.enableSourceTiming = enableSourceTiming;
     params.testOnly = testOnly;
     params.vds = vds;
     params.renderer = renderer;
@@ -2098,7 +2100,8 @@ bool Session::recreateVideoDecoder(bool flushEvents,
                        framePresentedContext,
                        pacingMode,
                        enableFrameReserve,
-                       pacingDiagnostics)) {
+                       pacingDiagnostics,
+                       m_Preferences->sourceTiming && pacingMode == StreamingPreferences::PM_SMOOTH)) {
         SDL_UnlockMutex(m_DecoderLock);
         return false;
     }
