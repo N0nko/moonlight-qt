@@ -22,6 +22,10 @@ public:
 
     Q_INVOKABLE void notifyWindowFocus(bool hasFocus);
 
+    Q_INVOKABLE void setStreamingActive(bool active) { m_StreamingActive = active; }
+
+    Q_INVOKABLE void handleControllerButton(int button, bool pressed);
+
     Q_INVOKABLE void setUiNavMode(bool settingsMode);
 
     Q_INVOKABLE int getConnectedGamepads();
@@ -42,5 +46,6 @@ private:
     bool m_UiNavMode;
     bool m_FirstPoll;
     bool m_HasFocus;
+    bool m_StreamingActive;
     Uint32 m_LastAxisNavigationEventTime;
 };

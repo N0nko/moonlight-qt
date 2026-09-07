@@ -14,6 +14,7 @@ SdlGamepadKeyNavigation::SdlGamepadKeyNavigation(StreamingPreferences* prefs)
       m_UiNavMode(false),
       m_FirstPoll(false),
       m_HasFocus(false),
+      m_StreamingActive(false),
       m_LastAxisNavigationEventTime(0)
 {
     m_PollingTimer = new QTimer(this);
@@ -101,6 +102,9 @@ void SdlGamepadKeyNavigation::notifyWindowFocus(bool hasFocus)
 
 void SdlGamepadKeyNavigation::onPollingTimerFired()
 {
+    if (!m_Enabled || !m_HasFocus) {
+        return;
+    }
     SDL_Event event;
 
     // Update joystick state without pumping other events (see enable() comment)
@@ -108,14 +112,15 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
 
     // Discard any pending button events on the first poll to avoid picking up
     // stale input data from the stream session (like the quit combo).
-    if (m_FirstPoll) {
+    if (m_FirstPoll && !m_StreamingActive) {
         SDL_FlushEvent(SDL_CONTROLLERBUTTONDOWN);
         SDL_FlushEvent(SDL_CONTROLLERBUTTONUP);
         m_FirstPoll = false;
     }
 
-    // Peep events rather than polling to avoid calling SDL_PumpEvents()
-    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT) == 1) {
+    // Session owns the SDL queue while streaming and forwards UI buttons.
+    while (!m_StreamingActive && m_HasFocus &&
+           SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT) == 1) {
         switch (event.type) {
         case SDL_QUIT:
             // SDL may send us a quit event since we initialize
@@ -125,79 +130,8 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
             break;
         case SDL_CONTROLLERBUTTONDOWN:
         case SDL_CONTROLLERBUTTONUP:
-        {
-            QEvent::Type type =
-                    event.type == SDL_CONTROLLERBUTTONDOWN ?
-                        QEvent::Type::KeyPress : QEvent::Type::KeyRelease;
-
-            // Swap face buttons if needed
-            if (m_Prefs->swapFaceButtons) {
-                switch (event.cbutton.button) {
-                case SDL_CONTROLLER_BUTTON_A:
-                    event.cbutton.button = SDL_CONTROLLER_BUTTON_B;
-                    break;
-                case SDL_CONTROLLER_BUTTON_B:
-                    event.cbutton.button = SDL_CONTROLLER_BUTTON_A;
-                    break;
-                case SDL_CONTROLLER_BUTTON_X:
-                    event.cbutton.button = SDL_CONTROLLER_BUTTON_Y;
-                    break;
-                case SDL_CONTROLLER_BUTTON_Y:
-                    event.cbutton.button = SDL_CONTROLLER_BUTTON_X;
-                    break;
-                }
-            }
-
-            switch (event.cbutton.button) {
-            case SDL_CONTROLLER_BUTTON_DPAD_UP:
-                if (m_UiNavMode) {
-                    // Back-tab
-                    sendKey(type, Qt::Key_Tab, Qt::ShiftModifier);
-                }
-                else {
-                    sendKey(type, Qt::Key_Up);
-                }
-                break;
-            case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-                if (m_UiNavMode) {
-                    sendKey(type, Qt::Key_Tab);
-                }
-                else {
-                    sendKey(type, Qt::Key_Down);
-                }
-                break;
-            case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-                sendKey(type, Qt::Key_Left);
-                break;
-            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-                sendKey(type, Qt::Key_Right);
-                break;
-            case SDL_CONTROLLER_BUTTON_A:
-                if (m_UiNavMode) {
-                    sendKey(type, Qt::Key_Space);
-                }
-                else {
-                    sendKey(type, Qt::Key_Return);
-                }
-                break;
-            case SDL_CONTROLLER_BUTTON_B:
-                sendKey(type, Qt::Key_Escape);
-                break;
-            case SDL_CONTROLLER_BUTTON_X:
-                sendKey(type, Qt::Key_Menu);
-                break;
-            case SDL_CONTROLLER_BUTTON_Y:
-            case SDL_CONTROLLER_BUTTON_START:
-                // HACK: We use this keycode to inform main.qml
-                // to show the settings when Key_Menu is handled
-                // by the control in focus.
-                sendKey(type, Qt::Key_Hangup);
-                break;
-            default:
-                break;
-            }
+            handleControllerButton(event.cbutton.button, event.type == SDL_CONTROLLERBUTTONDOWN);
             break;
-        }
         case SDL_CONTROLLERDEVICEADDED:
             SDL_GameController* gc = SDL_GameControllerOpen(event.cdevice.which);
             if (gc != nullptr) {
@@ -215,6 +149,11 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
             }
             break;
         }
+    }
+
+    // Back can hand focus to the stream synchronously from sendKey().
+    if (!m_HasFocus) {
+        return;
     }
 
     // Handle analog sticks by polling
@@ -259,6 +198,81 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
             sendKey(QEvent::Type::KeyRelease, Qt::Key_Right);
             m_LastAxisNavigationEventTime = SDL_GetTicks();
         }
+    }
+}
+
+void SdlGamepadKeyNavigation::handleControllerButton(int button, bool pressed)
+{
+    if (!m_Enabled || !m_HasFocus) {
+        return;
+    }
+    const QEvent::Type type = pressed ? QEvent::KeyPress : QEvent::KeyRelease;
+
+    // Swap face buttons if needed
+    if (m_Prefs->swapFaceButtons) {
+        switch (button) {
+        case SDL_CONTROLLER_BUTTON_A:
+            button = SDL_CONTROLLER_BUTTON_B;
+            break;
+        case SDL_CONTROLLER_BUTTON_B:
+            button = SDL_CONTROLLER_BUTTON_A;
+            break;
+        case SDL_CONTROLLER_BUTTON_X:
+            button = SDL_CONTROLLER_BUTTON_Y;
+            break;
+        case SDL_CONTROLLER_BUTTON_Y:
+            button = SDL_CONTROLLER_BUTTON_X;
+            break;
+        }
+    }
+
+    switch (button) {
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:
+        if (m_UiNavMode) {
+            // Back-tab
+            sendKey(type, Qt::Key_Tab, Qt::ShiftModifier);
+        }
+        else {
+            sendKey(type, Qt::Key_Up);
+        }
+        break;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+        if (m_UiNavMode) {
+            sendKey(type, Qt::Key_Tab);
+        }
+        else {
+            sendKey(type, Qt::Key_Down);
+        }
+        break;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+        sendKey(type, Qt::Key_Left);
+        break;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+        sendKey(type, Qt::Key_Right);
+        break;
+    case SDL_CONTROLLER_BUTTON_A:
+        if (m_UiNavMode) {
+            sendKey(type, Qt::Key_Space);
+        }
+        else {
+            sendKey(type, Qt::Key_Return);
+        }
+        break;
+    case SDL_CONTROLLER_BUTTON_B:
+        sendKey(type, Qt::Key_Escape);
+        break;
+    case SDL_CONTROLLER_BUTTON_X:
+        sendKey(type, Qt::Key_Menu);
+        break;
+    case SDL_CONTROLLER_BUTTON_Y:
+    case SDL_CONTROLLER_BUTTON_START:
+        // HACK: We use this keycode to inform main.qml
+        // to show the settings when Key_Menu is handled
+        // by the control in focus.
+        sendKey(type, Qt::Key_Hangup);
+        break;
+    default:
+        break;
     }
 }
 

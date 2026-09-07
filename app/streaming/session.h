@@ -153,6 +153,7 @@ public:
     void setShouldExit(bool quitHostApp = false);
 
 signals:
+    void settingsControllerButton(int button, bool pressed);
     void stageStarting(QString stage);
 
     void stageFailed(QString stage, int errorCode, QString failingPorts);

@@ -193,6 +193,13 @@ private:
 
     void refresh()
     {
+        // SDL can recreate the native window when changing renderers.
+        SDL_SysWMinfo info = {};
+        SDL_VERSION(&info.version);
+        if (SDL_GetWindowWMInfo(m_Window, &info) && info.subsystem == SDL_SYSWM_X11) {
+            m_NativeWindow = info.info.x11.window;
+        }
+
         Atom actualType = 0;
         int actualFormat = 0;
         unsigned long itemCount = 0;
@@ -2152,8 +2159,9 @@ bool Session::focusStreamWindow()
             const Atom focusAtom = XInternAtom(
                         display, "GAMESCOPECTRL_BASELAYER_WINDOW", True);
             if (focusAtom != 0) {
-                const unsigned long nativeWindow =
-                        static_cast<unsigned long>(info.info.x11.window);
+                // Release the legacy pin: it overrides Steam menus as well as
+                // the settings window. Normal activation lets Steam arbitrate.
+                const unsigned long nativeWindow = 0;
                 XChangeProperty(display,
                                 DefaultRootWindow(display),
                                 focusAtom,
@@ -2166,6 +2174,17 @@ bool Session::focusStreamWindow()
             }
             XCloseDisplay(display);
         }
+
+        XEvent activate = {};
+        activate.xclient.type = ClientMessage;
+        activate.xclient.window = info.info.x11.window;
+        activate.xclient.message_type = XInternAtom(info.info.x11.display, "_NET_ACTIVE_WINDOW", False);
+        activate.xclient.format = 32;
+        activate.xclient.data.l[0] = 1;
+        activate.xclient.data.l[1] = CurrentTime;
+        XSendEvent(info.info.x11.display, DefaultRootWindow(info.info.x11.display), False,
+                   SubstructureRedirectMask | SubstructureNotifyMask, &activate);
+        XFlush(info.info.x11.display);
     }
 #endif
 
@@ -2596,6 +2615,7 @@ void Session::exec()
             m_AudioMuted = m_Preferences->muteOnFocusLoss && !inputFocused;
             if (inputFocused) {
                 m_InputHandler->notifyFocusGained();
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Stream input focus restored");
             }
             else {
                 m_InputHandler->notifyFocusLost();
@@ -2841,7 +2861,11 @@ void Session::exec()
             break;
         case SDL_CONTROLLERBUTTONDOWN:
         case SDL_CONTROLLERBUTTONUP:
-            if (gamepadInputFocused) {
+            if (settingsWindowFocused) {
+                emit settingsControllerButton(event.cbutton.button,
+                                              event.type == SDL_CONTROLLERBUTTONDOWN);
+            }
+            else if (gamepadInputFocused) {
                 presence.runCallbacks();
                 m_InputHandler->handleControllerButtonEvent(&event.cbutton);
             }

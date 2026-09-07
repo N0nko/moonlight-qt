@@ -14,6 +14,12 @@ ApplicationWindow {
     property bool pollingActive: false
     property bool streamingActive: false
     property var streamingSession: null
+    onStreamingActiveChanged: SdlGamepadKeyNavigation.setStreamingActive(streamingActive)
+
+    Connections {
+        target: streamingSession
+        onSettingsControllerButton: SdlGamepadKeyNavigation.handleControllerButton(button, pressed)
+    }
 
     // Set by SettingsView to force the back operation to pop all
     // pages except the initial view. This is required when doing
@@ -100,6 +106,7 @@ ApplicationWindow {
 
     function goBack() {
         if (streamingActive && stackView.currentItem instanceof SettingsView) {
+            SdlGamepadKeyNavigation.notifyWindowFocus(false)
             window.lower()
             if (streamingSession !== null) {
                 streamingSession.focusStreamWindow()

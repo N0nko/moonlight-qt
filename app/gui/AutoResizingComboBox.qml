@@ -32,8 +32,11 @@ ComboBox {
         }
     }
 
-    // We call this every time the options change (and init)
-    // so we can adjust the combo box width here too
+    // Models and fonts can settle after the derived control's onCompleted.
+    Component.onCompleted: Qt.callLater(recalculateWidth)
+    onCountChanged: Qt.callLater(recalculateWidth)
+    onFontChanged: Qt.callLater(recalculateWidth)
+    onTextRoleChanged: Qt.callLater(recalculateWidth)
     onActivated: recalculateWidth()
 
     popup.onAboutToShow: {
