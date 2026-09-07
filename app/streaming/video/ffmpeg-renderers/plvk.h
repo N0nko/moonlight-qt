@@ -174,6 +174,7 @@ private:
     bool m_PacingDiagnostics = false;
     bool m_SourceTimingEnabled = false;
     bool m_SourceRefreshKnown = false;
+    int m_SourceDisplayHz = 0;
     uint64_t m_LastSourceSlotNs = 0;
     uint64_t m_SourcePresentNs = 0;
     uint32_t m_TargetLateSlots = 0;

@@ -1,4 +1,5 @@
 #include "../app/streaming/video/ffmpeg-renderers/pacer/sourcetimeline.h"
+#include "../app/streaming/video/ffmpeg-renderers/pacer/displayperiod.h"
 #include <cassert>
 #include <cmath>
 #include <deque>
@@ -136,6 +137,19 @@ void variableRate()
 
 int main()
 {
+    std::array<uint64_t, 32> scans;
+    scans.fill(11111111);
+    assert(validatedDisplayPeriod(16666666, 90, scans.data(), 0) == 0);
+    assert(validatedDisplayPeriod(16666666, 90, scans.data(), 32) == 11111111);
+    assert(validatedDisplayPeriod(11111111, 90, scans.data(), 0) == 11111111);
+    scans.fill(33333333); // 30 FPS on a 90 Hz panel is three scans, not 30 Hz.
+    assert(validatedDisplayPeriod(16666666, 90, scans.data(), 32) == 11111111);
+    scans.fill(22222222);
+    assert(validatedDisplayPeriod(16666666, 90, scans.data(), 32) == 11111111);
+    scans.fill(16666666); // Conflicting real timing must not validate as 90 Hz.
+    assert(validatedDisplayPeriod(16666666, 90, scans.data(), 32) == 0);
+    assert(validatedDisplayPeriod(16666666, 60, scans.data(), 32) == 16666666);
+    assert(validatedDisplayPeriod(16666666, 0, scans.data(), 32) == 0);
     edgeCases();
     driftAndLongSession();
     burstAfterResume();

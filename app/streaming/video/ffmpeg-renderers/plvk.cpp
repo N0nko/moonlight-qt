@@ -2,6 +2,7 @@
 
 #include "streaming/session.h"
 #include "streaming/streamutils.h"
+#include "pacer/displayperiod.h"
 
 // Implementation in plvk_c.c
 #define PL_LIBAV_IMPLEMENTATION 0
@@ -499,6 +500,7 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
     m_PacingMode = params->pacingMode;
     m_PacingDiagnostics = params->pacingDiagnostics;
     m_SourceTimingEnabled = params->enableSourceTiming;
+    m_SourceDisplayHz = m_SourceTimingEnabled ? StreamUtils::getDisplayRefreshRate(m_Window) : 0;
     m_PresentationSyncRequested = params->enableVsync &&
                                   m_PacingMode != StreamingPreferences::PM_FIFO;
     m_PresentationFeedbackRequested = m_PresentationSyncRequested || m_PacingDiagnostics;
@@ -881,26 +883,33 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
     if (receivedNewFeedback) {
         m_PresentsWithoutFeedback = 0;
 
-        if (m_SourceTimingEnabled) {
+        if (m_SourceTimingEnabled && !m_SourceRefreshKnown) {
             if (fn_vkGetRefreshCycleDurationGOOGLE == nullptr) {
                 fn_vkGetRefreshCycleDurationGOOGLE = reinterpret_cast<PFN_vkGetRefreshCycleDurationGOOGLE>(
                     fn_vkGetDeviceProcAddr(m_Vulkan->device, "vkGetRefreshCycleDurationGOOGLE"));
             }
             VkRefreshCycleDurationGOOGLE cycle = {};
-            if (fn_vkGetRefreshCycleDurationGOOGLE != nullptr &&
-                fn_vkGetRefreshCycleDurationGOOGLE(m_Vulkan->device, swapchain, &cycle) == VK_SUCCESS &&
-                cycle.refreshDuration >= 4000000 && cycle.refreshDuration <= 40000000) {
-                if (m_RefreshDurationNs == 0) {
-                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "Gamescope presentation sync active: reported %.3f Hz (%.3f ms)",
-                                1000000000.0 / cycle.refreshDuration, cycle.refreshDuration / 1000000.0);
+            if (fn_vkGetRefreshCycleDurationGOOGLE != nullptr) {
+                if (fn_vkGetRefreshCycleDurationGOOGLE(m_Vulkan->device, swapchain, &cycle) != VK_SUCCESS) {
+                    cycle.refreshDuration = 0;
                 }
-                m_RefreshDurationNs = cycle.refreshDuration;
+            }
+            const uint64_t validated = validatedDisplayPeriod(cycle.refreshDuration, m_SourceDisplayHz,
+                                                              m_ClockSamples.data(), m_ClockSampleCount);
+            if (validated != 0) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "Gamescope presentation sync active: validated %.3f Hz (%.3f ms), API %.3f ms, display %d Hz",
+                            1000000000.0 / validated, validated / 1000000.0,
+                            cycle.refreshDuration / 1000000.0, m_SourceDisplayHz);
+                m_RefreshDurationNs = validated;
                 m_SourceRefreshKnown = true;
+            }
+            else if (m_ClockSampleCount == m_ClockSamples.size()) {
+                m_ClockSampleCount = 0;
             }
         }
 
-        if (m_RefreshDurationNs == 0 &&
+        if (!m_SourceTimingEnabled && m_RefreshDurationNs == 0 &&
             m_ClockSampleCount == m_ClockSamples.size()) {
             auto sortedSamples = m_ClockSamples;
             std::sort(sortedSamples.begin(), sortedSamples.end());
