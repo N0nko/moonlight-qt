@@ -240,8 +240,13 @@ int Pacer::renderThread(void* context)
 AVFrame* Pacer::takeSourceFrameLocked()
 {
     while (!m_Stopping) {
+        const uint64_t arrivalWaitUs = m_PacingDiagnostics && m_RenderQueue.isEmpty() ? LiGetMicroseconds() : 0;
         while (!m_Stopping && m_RenderQueue.isEmpty()) {
             m_RenderQueueNotEmpty.wait(&m_FrameQueueLock);
+        }
+        if (arrivalWaitUs != 0) {
+            ++m_DiagnosticQueueWaits;
+            m_DiagnosticQueueWaitUs.push_back(LiGetMicroseconds() - arrivalWaitUs);
         }
         if (m_Stopping) {
             return nullptr;
@@ -270,6 +275,10 @@ AVFrame* Pacer::takeSourceFrameLocked()
                 return nullptr;
             }
             if (!m_SourceTimingEnabled) {
+                continue;
+            }
+            if (nowUs >= slot.presentUs) {
+                ++m_SourceDeadlineMisses;
                 continue;
             }
             uint32_t timestamps[MAX_QUEUED_FRAMES] = {};
@@ -665,6 +674,7 @@ void Pacer::logPacingDiagnostics()
     uint32_t droppedFrames;
     uint32_t sourceHolds;
     uint32_t sourceResets;
+    uint32_t sourceDeadlineMisses;
     uint64_t sourceMaxAgeUs;
     uint64_t sourceReserveUs;
     int minQueueDepth;
@@ -677,9 +687,11 @@ void Pacer::logPacingDiagnostics()
     droppedFrames = m_DiagnosticDroppedFrames;
     sourceHolds = m_SourceHolds;
     sourceResets = m_SourceResets;
+    sourceDeadlineMisses = m_SourceDeadlineMisses;
     sourceMaxAgeUs = m_SourceMaxQueueAgeUs;
     sourceReserveUs = m_SourceReserveUs;
     m_SourceHolds = m_SourceResets = 0;
+    m_SourceDeadlineMisses = 0;
     m_SourceMaxQueueAgeUs = 0;
     minQueueDepth = m_DiagnosticMinQueueDepth;
     maxQueueDepth = m_DiagnosticMaxQueueDepth;
@@ -713,8 +725,8 @@ void Pacer::logPacingDiagnostics()
                 droppedFrames);
     if (m_SourceTimingEnabled) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Source pacing: reserve %.3f ms, holds %u, resets %u, max decoded queue age %.3f ms",
-                    sourceReserveUs / 1000.0, sourceHolds, sourceResets, sourceMaxAgeUs / 1000.0);
+                    "Source pacing: reserve %.3f ms, holds %u, resets %u, expired slots %u, max decoded queue age %.3f ms",
+                    sourceReserveUs / 1000.0, sourceHolds, sourceResets, sourceDeadlineMisses, sourceMaxAgeUs / 1000.0);
     }
 }
 
