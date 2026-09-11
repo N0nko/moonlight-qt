@@ -15,7 +15,10 @@ It trims sustained excess depth with a short fade instead of allowing drift
 to accumulate without bound. This is adaptive playback, not a lossless DSP
 claim: trimming/fading trades a short audio correction for bounded latency.
 
-Network or callback gaps above 250 ms invalidate old queued samples. A stopped
+Explicit sleep/wake events and network or callback gaps above 250 ms invalidate
+old queued samples. The event path does not depend on Linux's monotonic clock
+advancing during suspend. Each new connection resets decoder bookkeeping.
+A stopped
 device or a callback that has stopped running triggers the existing device
 reinitialization path. Video and Deck microphone transport are unchanged.
 All preferences used by the audio worker are snapshotted at session creation.

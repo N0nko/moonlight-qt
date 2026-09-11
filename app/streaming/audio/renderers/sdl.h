@@ -16,6 +16,7 @@ public:
     virtual void* getAudioBuffer(int* size);
 
     virtual bool submitAudio(int bytesWritten);
+    void flushAudio() override;
 
     virtual AudioFormat getAudioBufferFormat();
 

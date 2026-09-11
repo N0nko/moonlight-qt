@@ -180,6 +180,8 @@ void Session::queueLifecycleSleepState(bool sleeping)
     }
 
     std::atomic_bool& queued = sleeping ? m_LifecycleSleepQueued : m_LifecycleWakeQueued;
+    // CLOCK_MONOTONIC may not advance during suspend: use the actual lifecycle event.
+    if (m_AdaptiveAudio) m_AudioResetPending.store(true, std::memory_order_release);
     if (!queued.exchange(true)) {
         SDL_Event event = {};
         event.type = SDL_USEREVENT;
