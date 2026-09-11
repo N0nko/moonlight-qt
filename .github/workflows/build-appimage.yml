@@ -160,6 +160,9 @@ jobs:
             tests/recoverypolicy_test.cpp \
             -o /tmp/recoverypolicy-test
           /tmp/recoverypolicy-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror -pthread \
+            tests/adaptivebuffer_test.cpp -o /tmp/adaptivebuffer-test
+          /tmp/adaptivebuffer-test
           c++ -std=c++17 -Wall -Wextra -Werror \
             tests/deckprotocol_test.cpp \
             -o /tmp/deckprotocol-test

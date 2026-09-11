@@ -247,6 +247,7 @@ HEADERS += \
     streaming/extensions/deckprotocol.h \
     streaming/deckmicrophone.h \
     streaming/audio/sdlaudiosubsystem.h \
+    streaming/audio/adaptivebuffer.h \
     streaming/session.h \
     streaming/audio/renderers/renderer.h \
     streaming/audio/renderers/sdl.h \

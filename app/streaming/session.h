@@ -340,6 +340,8 @@ private:
     void drFramePresented(void* context);
 
     StreamingPreferences* m_Preferences;
+    bool m_AdaptiveAudio;
+    bool m_AudioDiagnostics;
     bool m_IsFullScreen;
     SupportedVideoFormatList m_SupportedVideoFormats; // Sorted in order of descending priority
     STREAM_CONFIGURATION m_StreamConfig;
