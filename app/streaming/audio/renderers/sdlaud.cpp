@@ -153,8 +153,8 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
         if (m_Diagnostics && now - m_LastDiagnosticTicks >= 5000) {
             const auto stats = m_AdaptiveBuffer.stats();
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Adaptive audio: depth %u ms, target %u ms, underruns %u, trims %u, overflows %u, resets %u",
-                        stats.depthMs, stats.targetMs, stats.underruns, stats.trims, stats.overflows, stats.resets);
+                        "Adaptive audio: depth %u ms, target %u ms, underruns %u, trims %u, overflows %u, resets %u, rate %d ppm",
+                        stats.depthMs, stats.targetMs, stats.underruns, stats.trims, stats.overflows, stats.resets, stats.correctionPpm);
             m_LastDiagnosticTicks = now;
         }
         return true;

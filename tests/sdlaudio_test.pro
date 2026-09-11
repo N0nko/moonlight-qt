@@ -1,0 +1,9 @@
+TEMPLATE = app
+TARGET = sdlaudio-test
+QT = core
+CONFIG += console c++17 link_pkgconfig
+CONFIG -= app_bundle
+PKGCONFIG += sdl2
+QMAKE_CXXFLAGS += -Wall -Wextra -Werror -UNDEBUG
+INCLUDEPATH += ../app ../moonlight-common-c/moonlight-common-c/src
+SOURCES += sdlaudio_test.cpp ../app/streaming/audio/renderers/sdlaud.cpp
