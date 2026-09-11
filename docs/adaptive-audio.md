@@ -36,3 +36,13 @@ Video is never delayed to satisfy audio. The existing source/presentation
 pacing implementation is unchanged.
 
 Rollback: turn the setting off and reconnect, or run the baseline binary.
+
+## Live acceptance status (2026-09-12)
+
+AppImage a00c5a built successfully and ran on the Deck through the existing X11,
+VAAPI/Vulkan path. The real PipeWire/SDL run raised the target to 25 ms and still
+recorded underruns during early playback. No ring overflow occurred. A later
+test-source interruption contaminates the end of the run. Legacy queue timing
+and acoustic latency were not measured, so no quality/latency/power win is claimed.
+Leave this experiment off. Reproduce the real producer/callback batch cadence
+in a deterministic test before adjusting buffering or accepting the feature.
