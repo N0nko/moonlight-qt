@@ -25,6 +25,7 @@ int main()
                 SDL_Delay(5);
             }
             SDL_Delay(300); // callback keeps running, producer resumes after a gap
+            renderer.flushAudio(); // real lifecycle event, not a wall-clock guess
             for (int packet = 0; packet < 10; ++packet) {
                 assert(renderer.submitAudio(channels * config.samplesPerFrame * sizeof(float)));
                 SDL_Delay(5);

@@ -140,6 +140,9 @@ int Session::arInit(int /* audioConfiguration */,
                     void* /* arContext */, int /* arFlags */)
 {
     SDL_memcpy(&s_ActiveSession->m_OriginalAudioConfig, opusConfig, sizeof(*opusConfig));
+    s_ActiveSession->m_AudioSampleCount = 0;
+    s_ActiveSession->m_DropAudioEndTime = 0;
+    s_ActiveSession->m_AudioResetPending.store(false, std::memory_order_relaxed);
     s_ActiveSession->initializeAudioRenderer();
     return 0;
 }
@@ -156,6 +159,13 @@ void Session::arCleanup()
 void Session::arDecodeAndPlaySample(char* sampleData, int sampleLength)
 {
     int samplesDecoded;
+
+    if (s_ActiveSession->m_AudioResetPending.exchange(false, std::memory_order_acq_rel)) {
+        if (s_ActiveSession->m_AudioRenderer) s_ActiveSession->m_AudioRenderer->flushAudio();
+        if (s_ActiveSession->m_OpusDecoder)
+            opus_multistream_decoder_ctl(s_ActiveSession->m_OpusDecoder, OPUS_RESET_STATE);
+        s_ActiveSession->m_DropAudioEndTime = 0;
+    }
 
 #ifndef STEAM_LINK
     // Set this thread to high priority to reduce the chance of missing

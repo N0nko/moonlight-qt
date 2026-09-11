@@ -126,6 +126,12 @@ void SdlAudioRenderer::audioCallback(void* context, Uint8* stream, int length)
                                   length / (sizeof(float) * self->m_Channels));
 }
 
+void SdlAudioRenderer::flushAudio()
+{
+    if (m_Adaptive) m_AdaptiveBuffer.reset();
+    else SDL_ClearQueuedAudio(m_AudioDevice);
+}
+
 bool SdlAudioRenderer::submitAudio(int bytesWritten)
 {
     if (bytesWritten == 0) {
