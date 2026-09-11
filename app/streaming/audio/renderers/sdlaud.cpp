@@ -3,8 +3,10 @@
 
 #include <Limelight.h>
 
-SdlAudioRenderer::SdlAudioRenderer()
-    : m_AudioDevice(0),
+SdlAudioRenderer::SdlAudioRenderer(bool adaptive, bool diagnostics)
+    : m_Adaptive(adaptive),
+      m_Diagnostics(diagnostics),
+      m_AudioDevice(0),
       m_AudioSubsystemReference(SdlAudioSubsystem::acquire()),
       m_AudioBuffer(nullptr)
 {
@@ -34,6 +36,12 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
     // is 15 ms at regular 5 ms frames and 30 ms at 10 ms frames for slow connections.
     // The buffering helps avoid audio underruns due to network jitter.
     want.samples = SDL_max(480, opusConfig->samplesPerFrame * 3);
+    if (m_Adaptive) {
+        want.samples = SDL_max(480, opusConfig->samplesPerFrame);
+        want.callback = audioCallback;
+        want.userdata = this;
+    }
+    m_Channels = opusConfig->channelCount;
 
     m_FrameDurationMs = opusConfig->samplesPerFrame / (opusConfig->sampleRate / 1000);
     m_FrameSize = opusConfig->samplesPerFrame *
@@ -45,6 +53,12 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "Failed to open audio device: %s",
                      SDL_GetError());
+        return false;
+    }
+
+    if (m_Adaptive && !m_AdaptiveBuffer.configure(have.freq, have.channels,
+                                                 opusConfig->samplesPerFrame, have.samples)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Adaptive audio: unsupported device quantum/format");
         return false;
     }
 
@@ -70,6 +84,10 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
                 SDL_GetCurrentAudioDriver());
 
     // Start playback
+    m_LastSubmitTicks = m_LastDiagnosticTicks = SDL_GetTicks();
+    m_LastCallbackTicks.store(m_LastSubmitTicks, std::memory_order_relaxed);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Audio buffering: %s",
+                m_Adaptive ? "adaptive callback (experimental)" : "legacy SDL queue");
     SDL_PauseAudioDevice(m_AudioDevice, 0);
 
     return true;
@@ -97,10 +115,42 @@ void* SdlAudioRenderer::getAudioBuffer(int*)
     return m_AudioBuffer;
 }
 
+void SdlAudioRenderer::audioCallback(void* context, Uint8* stream, int length)
+{
+    auto self = static_cast<SdlAudioRenderer*>(context);
+    const auto now = SDL_GetTicks();
+    const auto previous = self->m_LastCallbackTicks.exchange(now, std::memory_order_relaxed);
+    if (now - previous > 250) self->m_AdaptiveBuffer.reset();
+    SDL_memset(stream, 0, length);
+    self->m_AdaptiveBuffer.render(reinterpret_cast<float*>(stream),
+                                  length / (sizeof(float) * self->m_Channels));
+}
+
 bool SdlAudioRenderer::submitAudio(int bytesWritten)
 {
     if (bytesWritten == 0) {
         // Nothing to do
+        return true;
+    }
+
+    if (m_Adaptive) {
+        const auto now = SDL_GetTicks();
+        if (SDL_GetAudioDeviceStatus(m_AudioDevice) == SDL_AUDIO_STOPPED ||
+                now - m_LastCallbackTicks.load(std::memory_order_relaxed) > 1000) {
+            return false;
+        }
+        if (now - m_LastSubmitTicks > 250) m_AdaptiveBuffer.reset();
+        m_LastSubmitTicks = now;
+        if (LiGetPendingAudioDuration() > 30) return true;
+        m_AdaptiveBuffer.push(static_cast<const float*>(m_AudioBuffer),
+                              bytesWritten / (sizeof(float) * m_Channels));
+        if (m_Diagnostics && now - m_LastDiagnosticTicks >= 5000) {
+            const auto stats = m_AdaptiveBuffer.stats();
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Adaptive audio: depth %u ms, target %u ms, underruns %u, trims %u, overflows %u, resets %u",
+                        stats.depthMs, stats.targetMs, stats.underruns, stats.trims, stats.overflows, stats.resets);
+            m_LastDiagnosticTicks = now;
+        }
         return true;
     }
 
@@ -132,6 +182,7 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "Failed to queue audio sample: %s",
                      SDL_GetError());
+        return false;
     }
 
     return true;

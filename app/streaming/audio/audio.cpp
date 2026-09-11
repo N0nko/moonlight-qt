@@ -21,6 +21,12 @@ IAudioRenderer* Session::createAudioRenderer(const POPUS_MULTISTREAM_CONFIGURATI
 {
     // Handle explicit ML_AUDIO setting and fail if the requested backend fails
     QString mlAudio = qgetenv("ML_AUDIO").toLower();
+    if (m_AdaptiveAudio && (mlAudio.isEmpty() || mlAudio == "sdl")) {
+        auto renderer = new SdlAudioRenderer(true, m_AudioDiagnostics);
+        if (renderer->prepareForPlayback(opusConfig)) return renderer;
+        delete renderer;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Adaptive audio unavailable; falling back to legacy SDL audio");
+    }
     if (mlAudio == "sdl") {
         TRY_INIT_RENDERER(SdlAudioRenderer, opusConfig)
         return nullptr;

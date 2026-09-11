@@ -999,6 +999,19 @@ Flickable {
                     CheckBox {
                         width: parent.width
                         hoverEnabled: true
+                        text: qsTr("Adaptive audio (experimental)")
+                        font.pointSize: 12
+                        checked: StreamingPreferences.adaptiveAudio
+                        onCheckedChanged: StreamingPreferences.adaptiveAudio = checked
+                        ToolTip.delay: 500
+                        ToolTip.timeout: 10000
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Uses a bounded callback buffer with gradual drift recovery. Does not delay video. Off restores the original audio path. Applies on the next stream.")
+                    }
+
+                    CheckBox {
+                        width: parent.width
+                        hoverEnabled: true
                         text: qsTr("Pacing diagnostics")
                         font.pointSize: 12
                         checked: StreamingPreferences.pacingDiagnostics

@@ -193,6 +193,7 @@ public:
     Q_PROPERTY(bool frameReserve MEMBER frameReserve NOTIFY frameReserveChanged)
     Q_PROPERTY(bool pacingDiagnostics MEMBER pacingDiagnostics NOTIFY pacingDiagnosticsChanged)
     Q_PROPERTY(bool sourceTiming MEMBER sourceTiming NOTIFY sourceTimingChanged)
+    Q_PROPERTY(bool adaptiveAudio MEMBER adaptiveAudio NOTIFY adaptiveAudioChanged)
     Q_PROPERTY(bool connectionWarnings MEMBER connectionWarnings NOTIFY connectionWarningsChanged)
     Q_PROPERTY(bool configurationWarnings MEMBER configurationWarnings NOTIFY configurationWarningsChanged)
     Q_PROPERTY(bool richPresence MEMBER richPresence NOTIFY richPresenceChanged)
@@ -246,6 +247,7 @@ public:
     bool frameReserve;
     bool pacingDiagnostics;
     bool sourceTiming;
+    bool adaptiveAudio;
     bool connectionWarnings;
     bool configurationWarnings;
     bool richPresence;
@@ -301,6 +303,7 @@ signals:
     void frameReserveChanged();
     void pacingDiagnosticsChanged();
     void sourceTimingChanged();
+    void adaptiveAudioChanged();
     void connectionWarningsChanged();
     void configurationWarningsChanged();
     void richPresenceChanged();
