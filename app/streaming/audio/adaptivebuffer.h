@@ -127,8 +127,9 @@ public:
         const auto take = m_Primed ? std::min(frames, depth) : 0;
         for (uint32_t i = 0; i < take; ++i) {
             const float weight = m_Fade ? 1.0f - static_cast<float>(m_Fade) / m_FadeLength : 1.0f;
+            const auto base = ((read + i) % m_Capacity) * m_Channels;
             for (uint32_t ch = 0; ch < m_Channels; ++ch) {
-                const float value = m_Ring[((read + i) % m_Capacity) * m_Channels + ch];
+                const float value = m_Ring[base + ch];
                 output[i * m_Channels + ch] = m_Last[ch] =
                         value * weight + m_FadeFrom[ch] * (1.0f - weight);
             }
