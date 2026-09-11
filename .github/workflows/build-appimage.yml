@@ -154,6 +154,7 @@ jobs:
 
       - name: Test stream policies
         run: |
+          sudo ldconfig
           c++ -std=c++17 -Wall -Wextra -Werror \
             app/streaming/lifecycle/recoverypolicy.cpp \
             app/streaming/lifecycle/recoverysettings.cpp \
@@ -163,12 +164,12 @@ jobs:
           c++ -std=c++17 -O2 -Wall -Wextra -Werror -pthread \
             tests/adaptivebuffer_test.cpp -o /tmp/adaptivebuffer-test
           /tmp/adaptivebuffer-test
-          c++ -std=c++17 -O2 -Wall -Wextra -Werror -fPIC -pthread \
-            -Iapp -Imoonlight-common-c/moonlight-common-c/src \
-            $(pkg-config --cflags sdl2 Qt6Core) \
-            app/streaming/audio/renderers/sdlaud.cpp tests/sdlaudio_test.cpp \
-            $(pkg-config --libs sdl2 Qt6Core) -o /tmp/sdlaudio-test
-          /tmp/sdlaudio-test
+          mkdir -p /tmp/sdlaudio-build
+          pushd /tmp/sdlaudio-build
+          qmake6 "$GITHUB_WORKSPACE/tests/sdlaudio_test.pro"
+          make -j2
+          ./sdlaudio-test
+          popd
           c++ -std=c++17 -Wall -Wextra -Werror \
             tests/deckprotocol_test.cpp \
             -o /tmp/deckprotocol-test

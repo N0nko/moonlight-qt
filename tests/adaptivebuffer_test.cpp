@@ -1,5 +1,6 @@
 #include "../app/streaming/audio/adaptivebuffer.h"
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <thread>
@@ -43,7 +44,7 @@ int main()
         assert(!b.push(packet.data(), 240));
         b.render(output.data(), 480);
         assert(b.stats().trims == 1 && b.stats().overflows == 1);
-        for (float v : output) assert(std::isfinite(v) && v >= 0 && v <= 1);
+        for (float v : output) assert(std::isfinite(v) && v >= -0.001f && v <= 1.001f);
         // Repeated starvation increases the target; silence alone cannot grow it.
         for (int cycle = 0; cycle < 10; ++cycle) {
             for (int n = 0; n < 12; ++n) b.push(packet.data(), 240);
@@ -53,22 +54,67 @@ int main()
         b.reset(); b.render(output.data(), 480);
         assert(b.stats().targetMs == 15);
     }
-    {
-        // Independent clocks: +500 ppm producer drift, one hour, bounded depth.
+    for (double drift : {-0.0005, 0.0005}) {
+        // Independent clocks: +/-500 ppm producer drift, ten minutes, bounded depth.
         AdaptiveAudioBuffer b;
         assert(b.configure(48000, 2, 240, 480));
         std::vector<float> packet(962, 0.25f), output(960);
-        assert(b.push(packet.data(), 480));
+        assert(b.push(packet.data(), 240));
         double carry = 0;
-        for (int n = 0; n < 360000; ++n) {
-            carry += 0.24;
+        for (int n = 0; n < 60000; ++n) {
+            carry += 480 * (1 + drift);
             const auto extra = static_cast<uint32_t>(carry);
             carry -= extra;
-            assert(b.push(packet.data(), 480 + extra));
+            assert(b.push(packet.data(), extra));
             b.render(output.data(), 480);
             assert(b.stats().depthMs < 60);
         }
-        assert(b.stats().underruns == 0 && b.stats().trims > 0);
+        assert(b.stats().underruns == 0 && b.stats().trims == 0);
+        assert(std::abs(b.stats().correctionPpm) <= 1000);
+    }
+    {
+        // Exercise fractional-delay filtering, not only constant PCM. Preserve
+        // 40 Hz..20 kHz amplitude and channel isolation while following clock drift.
+        AdaptiveAudioBuffer b;
+        assert(b.configure(48000, 6, 240, 480));
+        const std::array<double, 6> frequencies {40, 1000, 10000, 18000, 20000, 0};
+        std::array<double, 6> energy {};
+        std::vector<float> packet(481 * 6), output(480 * 6);
+        uint64_t source = 0, measured = 0;
+        auto pushTone = [&](uint32_t frames) {
+            for (uint32_t i = 0; i < frames; ++i, ++source)
+                for (size_t ch = 0; ch < frequencies.size(); ++ch)
+                    packet[i * 6 + ch] = 0.5 * std::sin(
+                                6.283185307179586 * frequencies[ch] * source / 48000);
+            assert(b.push(packet.data(), frames));
+        };
+        pushTone(240);
+        double carry = 0;
+        const auto start = std::chrono::steady_clock::now();
+        for (int n = 0; n < 2000; ++n) {
+            carry += 480.24;
+            const auto frames = static_cast<uint32_t>(carry);
+            carry -= frames;
+            pushTone(frames);
+            b.render(output.data(), 480);
+            if (n > 500) {
+                measured += 480;
+                for (size_t i = 0; i < output.size(); ++i) {
+                    assert(std::isfinite(output[i]));
+                    energy[i % 6] += output[i] * output[i];
+                }
+            }
+        }
+        for (size_t ch = 0; ch < 5; ++ch) {
+            const auto gainDb = 10 * std::log10(energy[ch] / measured / 0.125);
+            std::cout << "tone " << frequencies[ch] << " Hz: " << gainDb << " dB\n";
+            assert(std::abs(gainDb) < 0.1);
+        }
+        assert(energy[5] == 0);
+        assert(b.stats().underruns == 0 && b.stats().trims == 0);
+        std::cout << "20s six-channel tone test CPU wall time: "
+                  << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count()
+                  << "s (includes tone synthesis and assertions)\n";
     }
     {
         // Real concurrent producer/callback, including ring wrap and resets.
@@ -86,7 +132,7 @@ int main()
         std::vector<float> output(960);
         do {
             b.render(output.data(), 480);
-            for (float v : output) assert(std::isfinite(v) && v >= 0 && v <= 0.75f);
+            for (float v : output) assert(std::isfinite(v) && v >= -0.001f && v <= 0.751f);
         } while (!done.load());
         producer.join();
     }

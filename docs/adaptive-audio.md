@@ -11,21 +11,23 @@ The new renderer uses the existing SDL backend with a preallocated SPSC ring.
 Its device callback does not allocate, lock, poll, log or wait for packets.
 The target starts at 15 ms or one device quantum plus one packet, whichever is
 larger. Repeated starvation grows it up to 60 ms; quiet playback relaxes it.
-It trims sustained excess depth with a short fade instead of allowing drift
-to accumulate without bound. This is adaptive playback, not a lossless DSP
-claim: trimming/fading trades a short audio correction for bounded latency.
+It follows slow clock drift in both directions with a bounded +/-0.1% fractional
+rate correction, using a precomputed 32-tap windowed-sinc interpolator to avoid
+linear interpolation's high-frequency attenuation. Large excess queues are trimmed
+with a short fade. This is not bit-perfect/lossless playback: resampling and
+fading trade a small signal change for bounded latency and continuity.
 
 Explicit sleep/wake events and network or callback gaps above 250 ms invalidate
 old queued samples. The event path does not depend on Linux's monotonic clock
 advancing during suspend. Each new connection resets decoder bookkeeping.
-A stopped
-device or a callback that has stopped running triggers the existing device
+A stopped device or a callback that has stopped running triggers the existing device
 reinitialization path. Video and Deck microphone transport are unchanged.
 All preferences used by the audio worker are snapshotted at session creation.
 
 `tests/adaptivebuffer_test.cpp` covers invalid formats, channel layouts,
-priming, steady playback, overflow, starvation growth/reset, positive clock
-drift and concurrent wrap/reset. These are synthetic policy tests, not proof
+priming, steady playback, overflow, starvation growth/reset, positive and negative
+clock drift, concurrent wrap/reset, and multichannel 40 Hz..20 kHz tone amplitude.
+These are synthetic tests, not proof
 of speaker latency, subjective quality or power savings. The full SDL backend
 and actual Deck endpoint still need A/B measurement and resume/unplug tests.
 
