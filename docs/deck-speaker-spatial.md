@@ -71,7 +71,10 @@ the normal ALSA Speaker sink, retaining Valve's installed DSP/protection.
 The helper runs only on a settings query/change. No resident Python process,
 timer, network listener or shell launcher hook is added. The native filter is
 passive when idle. Changing mode briefly relinks audio; it does not reconnect
-the video stream. Mode changes check actual playback links for existing active
+the video stream. Before loading a replacement, the helper waits for the old
+filter nodes to disappear and existing streams to return to the speaker sink.
+This bounded graph-state check avoids racing WirePlumber link removal; it does
+not impose a fixed sleep. Mode changes check actual playback links for existing active
 speaker streams, not just published node names. Failure restores the previous
 owned unit/config. If its links also fail, processing is disabled to let
 WirePlumber restore direct audio instead of retaining a silent filter.

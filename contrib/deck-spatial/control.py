@@ -221,7 +221,7 @@ def playing_sources(items, target):
             and properties(n).get('node.name') != NAME + '-output'}
 
 
-def wait_routing(expected_sources, timeout=3):
+def wait_routing(expected_sources, timeout=3, enabled=True):
     # A published sink alone is not proof of audio: WirePlumber can fail to link it.
     deadline = time.monotonic() + timeout
     while True:
@@ -240,12 +240,18 @@ def wait_routing(expected_sources, timeout=3):
         active = [(int(properties(n).get('link.output.node', -1)),
                    int(properties(n).get('link.input.node', -1))) for n in items
                   if n.get('info', {}).get('state') == 'active']
-        if present and (not sources or
+        if not enabled:
+            ready = (NAME not in ids and NAME + '-output' not in ids
+                     and all((source, ids[target]) in connected for source in sources)
+                     and all((source, ids[target]) in active for source in playing))
+        else:
+            ready = present and (not sources or
                         (connected.count((ids[NAME + '-output'], ids[target])) >= 2
                          and all((source, ids[NAME]) in connected for source in sources)
                          and (not playing or
                               (active.count((ids[NAME + '-output'], ids[target])) >= 2
-                               and all((source, ids[NAME]) in active for source in playing))))):
+                               and all((source, ids[NAME]) in active for source in playing)))))
+        if ready:
             return
         if time.monotonic() >= deadline:
             raise RuntimeError('Speaker playback links did not activate')
@@ -310,6 +316,10 @@ def set_mode(mode):
         except RuntimeError:
             pass
     try:
+        # systemctl restart can outrun WirePlumber's asynchronous link removal.
+        if was_active:
+            command('/usr/bin/systemctl', '--user', 'stop', UNIT)
+        wait_routing(expected_sources, enabled=False)
         atomic(STATE / 'filter.conf', config)
         atomic(UNITFILE, unit_text(data))
         command('/usr/bin/systemctl', '--user', 'daemon-reload')
