@@ -282,7 +282,8 @@ ffmpeg {
         streaming/video/ffmpeg-renderers/sdlvid.h \
         streaming/video/ffmpeg-renderers/swframemapper.h \
         streaming/video/ffmpeg-renderers/pacer/pacer.h \
-        streaming/video/ffmpeg-renderers/pacer/sourcetimeline.h
+        streaming/video/ffmpeg-renderers/pacer/sourcetimeline.h \
+        streaming/video/ffmpeg-renderers/pacer/lowlatencypolicy.h
 }
 libva {
     message(VAAPI renderer selected)

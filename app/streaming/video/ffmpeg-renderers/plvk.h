@@ -1,6 +1,7 @@
 #pragma once
 
 #include "renderer.h"
+#include "pacer/lowlatencypolicy.h"
 
 #ifdef Q_OS_WIN32
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -181,6 +182,13 @@ private:
     bool m_DisplayTimingAvailable = false;
     bool m_MissingFeedbackLogged = false;
     int m_PresentLeadOverrideUs = -1;
+    bool m_AdaptivePresentLeadEnabled = false;
+    AdaptivePresentLead m_AdaptivePresentLead;
+    PresentationHistory m_PresentationHistory;
+    uint64_t m_PendingDecodeReadyNs = 0;
+    std::vector<uint64_t> m_ReadyToSubmitNs;
+    std::vector<uint64_t> m_ReadyToPresentNs;
+    std::vector<uint64_t> m_SubmitToPresentNs;
     VkSwapchainKHR m_TimingSwapchain = VK_NULL_HANDLE;
     PFN_vkGetDeviceProcAddr fn_vkGetDeviceProcAddr = nullptr;
     PFN_vkGetPastPresentationTimingGOOGLE fn_vkGetPastPresentationTimingGOOGLE = nullptr;

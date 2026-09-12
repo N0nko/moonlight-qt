@@ -1,4 +1,5 @@
 #include "pacer.h"
+#include "lowlatencypolicy.h"
 #include "streaming/streamutils.h"
 
 #ifdef Q_OS_WIN32
@@ -222,6 +223,15 @@ int Pacer::renderThread(void* context)
             av_frame_free(&droppedFrame);
         }
 
+        // Select after the renderer wait, before submitting any older decoded image.
+        for (int drops = latestFramesToDrop(me->m_RenderQueue.count(), me->m_LatestFrameEnabled);
+             drops > 0; --drops) {
+            AVFrame* stale = me->m_RenderQueue.dequeue();
+            ++me->m_VideoStats->pacerDroppedFrames;
+            ++me->m_DiagnosticDroppedFrames;
+            av_frame_free(&stale);
+        }
+
         me->recordReserveUseLocked(me->m_RenderQueue.count(), reserveFrames);
         AVFrame* frame = me->m_RenderQueue.dequeue();
         me->recordQueueDepthLocked();
@@ -411,7 +421,7 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
 
 bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing,
                        bool enableFrameReserve, bool pacingDiagnostics,
-                       bool enableSourceTiming)
+                       bool enableSourceTiming, StreamingPreferences::PacingMode pacingMode)
 {
     m_MaxVideoFps = maxVideoFps;
     m_DisplayFps = StreamUtils::getDisplayRefreshRate(window);
@@ -438,6 +448,16 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing,
     bool rendererPacing = m_RendererAttributes & RENDERER_ATTRIBUTE_INTERNAL_PACING;
     m_SourceTimingEnabled = enableSourceTiming && enablePacing && rendererPacing &&
                             m_VsyncRenderer->isRenderThreadSupported();
+#ifdef Q_OS_LINUX
+    m_LatestFrameEnabled = pacingMode == StreamingPreferences::PM_CURRENT &&
+                          enablePacing && rendererPacing && !m_FrameReserveEnabled &&
+                          !m_SourceTimingEnabled && m_VsyncRenderer->isRenderThreadSupported() &&
+                          qgetenv("MOONLIGHT_LATEST_FRAME") != "0";
+#else
+    Q_UNUSED(pacingMode);
+#endif
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Newest decoded frame selection: %s",
+                m_LatestFrameEnabled ? "enabled" : "disabled");
     if (enablePacing && !rendererPacing) {
         SDL_SysWMinfo info;
         SDL_VERSION(&info.version);

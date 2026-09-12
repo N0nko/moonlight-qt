@@ -514,7 +514,7 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
                                  params->enableFramePacing || (params->enableVsync && (m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_FORCE_PACING)),
                                  params->enableFrameReserve,
                                  params->pacingDiagnostics,
-                                 params->enableSourceTiming)) {
+                                 params->enableSourceTiming, params->pacingMode)) {
             return false;
         }
     }
