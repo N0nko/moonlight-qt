@@ -35,3 +35,20 @@ MOONLIGHT_PRESENT_LEAD_US overrides the experiment. No extra frame is reserved.
 Do not promote adaptive timing without a repeated live age/gap comparison.
 Keep the prior AppDir and settings for rollback. No Sunshine, Wi-Fi, audio,
 input, HDR or hibernation policy is changed by this patch.
+
+## Deck comparison, 2026-09-12
+
+Same-binary old/new/old/new runs at 1280x800, 90 FPS AV1 HDR, 200 Mbps,
+45 seconds each after warmup, using the pendulum. New selection reduced the
+worst five-second-window ready-to-present p99 from 47.97 to 37.85 ms across
+the two repeats. Mean window medians were 33.87 versus 33.41 ms, but the
+second new-policy run had a higher median than its baseline: a consistent
+typical-latency reduction is NOT established. Presentation gaps were 0/8112
+old versus 1/8112 new; the short test cannot establish a smoothness change.
+These are window aggregates, not global percentiles or input-to-photon times.
+
+Keep newest selection enabled and adaptive lead disabled. The exploratory
+adaptive run retained a reported 1.389 ms lead and did not demonstrate benefit.
+The remaining roughly 24-27 ms present-hook-to-presentation queue is not fixed
+by newest decoded selection. Keep phase/queue measurements for future work;
+do not add a frame reserve or claim zero jitter on the strength of this test.
