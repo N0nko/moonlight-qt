@@ -61,6 +61,7 @@ def design(data):
         kernel[:, -64:] *= np.linspace(1, 0, 64)
         virtual.append(kernel)
     surround = np.zeros((2, 8, 2047))
+    room = np.zeros((2, 2, 2047))
     for channel, h in enumerate(virtual):
         surround[0, channel, :1023] = np.convolve(direct, h[0]) + np.convolve(cross, h[1])
         surround[1, channel, :1023] = np.convolve(cross, h[0]) + np.convolve(direct, h[1])
@@ -80,8 +81,11 @@ def design(data):
                     np.convolve(direct, reflected[0]) + np.convolve(cross, reflected[1]),
                     np.convolve(cross, reflected[0]) + np.convolve(direct, reflected[1])])
                 pair *= level / max(1, np.sqrt(np.sum(pair ** 2)))
-                surround[:, channel, delay:delay + 1023] += pair
-    return stereo, surround, ratios, f
+                room[:, channel - 4, delay:delay + 1023] += pair
+    # Stereo ambience uses only the side signal, so centred dialogue stays dry.
+    side_room = (room[:, 0] - room[:, 1]) / 2
+    stereo_room = np.stack((side_room, -side_room), axis=1)
+    return stereo, surround[:, :, :1023], stereo_room, room, ratios, f
 
 
 def write_matrix(path, matrix, headroom_db):
@@ -105,10 +109,12 @@ def main():
     args = parser.parse_args()
     data = json.loads(args.hrtf.read_text())
     assert data['sample_rate'] == RATE
-    stereo, surround, ratios, f = design(data)
+    stereo, surround, stereo_room, surround_room, ratios, f = design(data)
     args.output.mkdir(parents=True, exist_ok=True)
     stereo, sg = write_matrix(args.output / 'stereo.wav', stereo, 4.5)
     surround, vg = write_matrix(args.output / 'surround.wav', surround, 9)
+    write_matrix(args.output / 'stereo-room.wav', stereo_room, 4.5)
+    write_matrix(args.output / 'surround-room.wav', surround_room, 9)
     assert np.all(np.isfinite(stereo)) and np.all(np.isfinite(surround))
     mono = stereo.sum(axis=1)
     expected = np.zeros(LENGTH)

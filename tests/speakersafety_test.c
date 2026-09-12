@@ -29,6 +29,32 @@ int main(void)
     d->run(h, 256);
     for (int i = 0; i < 256; ++i) assert(isfinite(l[i]) && fabsf(l[i]) <= .950001f);
     d->cleanup(h);
+
+    h = d->instantiate(d, 48000, NULL, NULL);
+    float wet_l[256], wet_r[256], width = 1, distance = 1;
+    d->connect_port(h, 0, l); d->connect_port(h, 1, r);
+    d->connect_port(h, 2, a); d->connect_port(h, 3, b);
+    d->connect_port(h, 4, wet_l); d->connect_port(h, 5, wet_r);
+    d->connect_port(h, 6, &width); d->connect_port(h, 7, &distance);
+    for (int i = 0; i < 256; ++i) { l[i] = .1f; r[i] = -.1f; wet_l[i] = .02f; wet_r[i] = -.02f; }
+    d->activate(h); d->run(h, 256);
+    assert(fabsf(a[0] - .12f) < 1e-6f && fabsf(b[0] + .12f) < 1e-6f);
+    width = 1.5f; distance = 2;
+    d->run(h, 256);
+    assert(a[0] > .12f && a[0] < .121f); // Control changes ramp, not step.
+    for (int j = 0; j < 100; ++j) d->run(h, 256);
+    assert(fabsf(a[255] - .21f) < 1e-6f && fabsf(b[255] + .21f) < 1e-6f);
+    for (int i = 0; i < 256; ++i) { r[i] = l[i]; wet_l[i] = wet_r[i] = 0; }
+    d->run(h, 256);
+    assert(fabsf(a[0] - .1f) < 1e-6f && a[0] == b[0]); // Width does not move centred dialogue.
+    width = INFINITY; distance = NAN;
+    d->activate(h); d->run(h, 256);
+    assert(isfinite(a[0]) && a[0] == b[0]);
+    width = 100; distance = 100;
+    for (int i = 0; i < 256; ++i) { l[i] = 5; r[i] = -5; wet_l[i] = 3; wet_r[i] = -3; }
+    d->activate(h); d->run(h, 256);
+    for (int i = 0; i < 256; ++i) assert(fabsf(a[i]) <= .950001f && fabsf(b[i]) <= .950001f);
+    d->cleanup(h);
     puts("speaker safety: passed");
     return 0;
 }

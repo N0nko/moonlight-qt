@@ -27,6 +27,25 @@ excessive volume. A stereo-linked, zero-lookahead sample-peak guard limits both
 outputs to 0.95, preserving their relative levels. It is an emergency overload
 guard, not a true-peak mastering limiter; heavy overload can pump/distort.
 
+## Live controls
+
+- **Width (50-150%):** scales the stereo difference after spatial processing,
+  keeping the centre unchanged. 100% is the original width.
+- **Distance (0-200%):** varies quiet, filtered room-reflection strength. It is
+  a perceptual cue, not a physical distance in metres or a room calibration.
+  Virtual surround applies this only to the rear-left/right paths. Spacious
+  stereo adds side-only ambience, leaving centred/mono dialogue dry.
+- **Reset:** restores Width 100%, Distance 0% for Spacious stereo; Width 100%,
+  Distance 100% for Virtual surround. Both reproduce the previously shipped
+  defaults (surround FIR reconstruction differs by at most one PCM32 LSB).
+
+Profiles are saved separately for both modes, including across Off/reboots.
+Sliders update native PipeWire control ports without rebuilding the graph,
+reconnecting Moonlight, or adding direct-path delay. Changes are coalesced over
+120 ms and smoothed in the native plugin over 20 ms to avoid abrupt steps.
+Moving a slider does not regenerate FIRs. Strong settings can sound less natural;
+Reset returns to the known baseline. There is no background control polling.
+
 ## Placement and limits
 
 The model assumes approximately 22 cm speaker spacing and a centred listener
@@ -52,8 +71,13 @@ the normal ALSA Speaker sink, retaining Valve's installed DSP/protection.
 The helper runs only on a settings query/change. No resident Python process,
 timer, network listener or shell launcher hook is added. The native filter is
 passive when idle. Changing mode briefly relinks audio; it does not reconnect
-the video stream. Restart failure restores the previous owned unit/config.
+the video stream. Mode changes check actual playback links for existing active
+speaker streams, not just published node names. Failure restores the previous
+owned unit/config. If its links also fail, processing is disabled to let
+WirePlumber restore direct audio instead of retaining a silent filter.
 Removing/stopping the filter allows WirePlumber to restore direct audio.
+This bounded mode-change check is not a resident watchdog for unrelated later
+PipeWire, device, or suspend failures.
 
 All persistent files are under the user's home:
 

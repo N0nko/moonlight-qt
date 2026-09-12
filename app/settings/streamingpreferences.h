@@ -27,6 +27,8 @@ public:
 
     Q_INVOKABLE void refreshSpeakerSpatial();
     Q_INVOKABLE void setSpeakerSpatial(int mode);
+    Q_INVOKABLE void setSpeakerSpatialTuning(int width, int distance);
+    Q_INVOKABLE void resetSpeakerSpatialTuning();
 
     void reload();
 
@@ -190,6 +192,9 @@ public:
     Q_PROPERTY(bool speakerSpatialAvailable MEMBER speakerSpatialAvailable NOTIFY speakerSpatialChanged)
     Q_PROPERTY(bool speakerSpatialBusy MEMBER speakerSpatialBusy NOTIFY speakerSpatialChanged)
     Q_PROPERTY(QString speakerSpatialStatus MEMBER speakerSpatialStatus NOTIFY speakerSpatialChanged)
+    Q_PROPERTY(int speakerSpatialWidth MEMBER speakerSpatialWidth NOTIFY speakerSpatialChanged)
+    Q_PROPERTY(int speakerSpatialDistance MEMBER speakerSpatialDistance NOTIFY speakerSpatialChanged)
+    Q_PROPERTY(bool speakerSpatialTunable MEMBER speakerSpatialTunable NOTIFY speakerSpatialChanged)
     Q_PROPERTY(bool multiController MEMBER multiController NOTIFY multiControllerChanged)
     Q_PROPERTY(bool enableMdns MEMBER enableMdns NOTIFY enableMdnsChanged)
     Q_PROPERTY(bool quitAppAfter MEMBER quitAppAfter NOTIFY quitAppAfterChanged)
@@ -248,6 +253,9 @@ public:
     bool speakerSpatialAvailable = false;
     bool speakerSpatialBusy = false;
     QString speakerSpatialStatus;
+    int speakerSpatialWidth = 100;
+    int speakerSpatialDistance = 100;
+    bool speakerSpatialTunable = false;
     bool multiController;
     bool enableMdns;
     bool quitAppAfter;
@@ -337,7 +345,8 @@ private:
 
     QString getSuffixFromLanguage(Language lang);
 
-    void runSpeakerSpatial(int mode);
+    void runSpeakerSpatial(const QStringList& arguments);
+    void flushSpeakerSpatialTuning();
 
     void handleLiveBitrateResult(quint32 requestId, int status,
                                  int appliedBitrateKbps);
@@ -349,5 +358,7 @@ private:
     quint32 m_LiveBitrateRequestId;
     QTimer m_RemoteDisplayTimeout;
     quint32 m_RemoteDisplayRequestId;
+    QTimer m_SpeakerTuningDebounce;
+    bool m_SpeakerTuningPending = false;
 };
 

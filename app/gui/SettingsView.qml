@@ -1195,11 +1195,60 @@ Flickable {
                         onActivated: StreamingPreferences.setSpeakerSpatial(currentIndex)
                     }
 
+                    Column {
+                        width: parent.width
+                        spacing: 2
+                        visible: StreamingPreferences.speakerSpatialMode !== 0
+                        enabled: StreamingPreferences.speakerSpatialTunable
+
+                        RowLayout {
+                            width: parent.width
+                            Label {
+                                Layout.fillWidth: true
+                                text: qsTr("Width: %1%").arg(StreamingPreferences.speakerSpatialWidth)
+                                font.pointSize: 11
+                            }
+                            Button {
+                                text: qsTr("Reset")
+                                onClicked: StreamingPreferences.resetSpeakerSpatialTuning()
+                            }
+                        }
+
+                        Slider {
+                            width: parent.width
+                            from: 50; to: 150; stepSize: 5
+                            value: StreamingPreferences.speakerSpatialWidth
+                            onMoved: StreamingPreferences.setSpeakerSpatialTuning(Math.round(value),
+                                              StreamingPreferences.speakerSpatialDistance)
+                        }
+
+                        Label {
+                            width: parent.width
+                            text: qsTr("Distance: %1%").arg(StreamingPreferences.speakerSpatialDistance)
+                            font.pointSize: 11
+                        }
+
+                        Slider {
+                            width: parent.width
+                            from: 0; to: 200; stepSize: 5
+                            value: StreamingPreferences.speakerSpatialDistance
+                            onMoved: StreamingPreferences.setSpeakerSpatialTuning(StreamingPreferences.speakerSpatialWidth,
+                                                                                  Math.round(value))
+                        }
+
+                        Label {
+                            width: parent.width
+                            font.pointSize: 9
+                            wrapMode: Text.Wrap
+                            text: qsTr("Distance changes room cues, not metres. Values apply live and are saved separately for each mode.")
+                        }
+                    }
+
                     Label {
                         width: parent.width
                         font.pointSize: 9
                         wrapMode: Text.Wrap
-                        text: StreamingPreferences.speakerSpatialBusy ? qsTr("Applying speaker mode...") :
+                        text: StreamingPreferences.speakerSpatialBusy ? qsTr("Applying speaker settings...") :
                               StreamingPreferences.speakerSpatialStatus
                     }
 
