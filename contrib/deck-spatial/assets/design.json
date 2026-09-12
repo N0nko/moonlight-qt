@@ -1,0 +1,42 @@
+{
+  "sample_rate": 48000,
+  "generic_model_only": true,
+  "hrtf_sha256": "2768ac841213a7ae11d1ea7fd0f25a69b39216102dc5dd913ea6ba0f0dc57e28",
+  "speaker_spacing_m_assumed": 0.22,
+  "stereo_gain_db": -4.5,
+  "surround_gain_db": -9.0,
+  "stereo_design_delay_ms": 1.0,
+  "surround_design_delay_ms": 2.0,
+  "rear_only_reflections": [
+    {
+      "delay_ms": 12,
+      "gain": 0.22
+    },
+    {
+      "delay_ms": 20,
+      "gain": 0.14
+    }
+  ],
+  "model_results_not_acoustic_measurements": [
+    {
+      "distance_m": 0.35,
+      "median_crosstalk_reduction_db_500_2500": 12.095294248824779
+    },
+    {
+      "distance_m": 0.45,
+      "median_crosstalk_reduction_db_500_2500": 10.09334573926161
+    },
+    {
+      "distance_m": 0.6,
+      "median_crosstalk_reduction_db_500_2500": 6.075005517842362
+    },
+    {
+      "distance_m": 0.75,
+      "median_crosstalk_reduction_db_500_2500": 4.547706636592715
+    }
+  ],
+  "assets": {
+    "stereo.wav": "69198e59929c79dff9381f700697df82c15fe2fea5efd20632eebd8c66ac1dbe",
+    "surround.wav": "603145bf8cdaf5f2e0bca1e8c54968baf57000d86b22122c7f79c759d3a847b0"
+  }
+}

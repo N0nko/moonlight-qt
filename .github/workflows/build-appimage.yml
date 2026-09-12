@@ -154,6 +154,9 @@ jobs:
 
       - name: Test stream policies
         run: |
+          python3 tests/deckspatial_test.py
+          cc -std=c11 -O2 -Wall -Wextra -Werror tests/speakersafety_test.c -lm -o /tmp/speakersafety-test
+          /tmp/speakersafety-test
           sudo ldconfig
           c++ -std=c++17 -Wall -Wextra -Werror \
             app/streaming/lifecycle/recoverypolicy.cpp \

@@ -1,0 +1,10 @@
+HRTF data: Copyright 1994 MIT Media Laboratory.
+Authors: Bill Gardner and Keith Martin.
+https://sound.media.mit.edu/resources/KEMAR.html
+
+The MIT KEMAR data is provided free with no restrictions on use, provided
+the authors are cited when the data is used in research or commercial work.
+The filter assets here are derived from the MIT_KEMAR_normal_pinna.sofa
+dataset supplied by libmysofa, sampled through its 48 kHz interpolator.
+These are generic dummy-head measurements, not measurements of this user
+or of Steam Deck speakers. No Dolby or BACCH implementation is included.

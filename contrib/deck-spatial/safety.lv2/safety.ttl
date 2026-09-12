@@ -1,0 +1,10 @@
+@prefix lv2: <http://lv2plug.in/ns/lv2core#> .
+@prefix doap: <http://usefulinc.com/ns/doap#> .
+<urn:moonlight:deck-speaker-safety> a lv2:Plugin, lv2:LimiterPlugin ;
+    doap:name "Moonlight speaker safety" ;
+    doap:license <https://www.gnu.org/licenses/gpl-3.0.html> ;
+    lv2:optionalFeature lv2:hardRTCapable ;
+    lv2:port [ a lv2:InputPort, lv2:AudioPort ; lv2:index 0 ; lv2:symbol "left" ; lv2:name "Left" ],
+             [ a lv2:InputPort, lv2:AudioPort ; lv2:index 1 ; lv2:symbol "right" ; lv2:name "Right" ],
+             [ a lv2:OutputPort, lv2:AudioPort ; lv2:index 2 ; lv2:symbol "out_left" ; lv2:name "Output left" ],
+             [ a lv2:OutputPort, lv2:AudioPort ; lv2:index 3 ; lv2:symbol "out_right" ; lv2:name "Output right" ] .

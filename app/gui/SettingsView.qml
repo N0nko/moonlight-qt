@@ -70,6 +70,7 @@ Flickable {
     }
 
     StackView.onActivated: {
+        StreamingPreferences.refreshSpeakerSpatial()
         // This enables Tab and BackTab based navigation rather than arrow keys.
         // It is required to shift focus between controls on the settings page.
         SdlGamepadKeyNavigation.setUiNavMode(true)
@@ -707,6 +708,92 @@ Flickable {
                     }
                 }
 
+                GroupBox {
+                    id: deckDisplayGroupBox
+                    width: parent.width
+                    padding: 12
+                    title: "<font color=\"skyblue\">" + qsTr("Remote Display") + "</font>"
+                    font.pointSize: 12
+
+                    Column {
+                        anchors.fill: parent
+                        spacing: 6
+
+                        Row {
+                            spacing: 8
+
+                            Button {
+                                text: qsTr("Desk")
+                                enabled: window.streamingActive &&
+                                         StreamingPreferences.remoteDisplayState !== StreamingPreferences.RDS_PENDING
+                                onClicked: StreamingPreferences.applyRemoteDisplayProfile(StreamingPreferences.RDP_DESK)
+                            }
+
+                            Button {
+                                text: qsTr("Remote")
+                                enabled: window.streamingActive &&
+                                         StreamingPreferences.remoteDisplayState !== StreamingPreferences.RDS_PENDING
+                                onClicked: StreamingPreferences.applyRemoteDisplayProfile(StreamingPreferences.RDP_REMOTE)
+                            }
+
+                            Button {
+                                text: qsTr("TV")
+                                enabled: window.streamingActive &&
+                                         StreamingPreferences.remoteDisplayState !== StreamingPreferences.RDS_PENDING
+                                onClicked: StreamingPreferences.applyRemoteDisplayProfile(StreamingPreferences.RDP_TV)
+                            }
+                        }
+
+                        Label {
+                            width: parent.width
+                            visible: window.streamingActive
+                            font.pointSize: 9
+                            wrapMode: Text.Wrap
+                            text: {
+                                var profile = qsTr("Display")
+                                if (StreamingPreferences.remoteDisplayProfile === StreamingPreferences.RDP_DESK)
+                                    profile = qsTr("Desk")
+                                else if (StreamingPreferences.remoteDisplayProfile === StreamingPreferences.RDP_REMOTE)
+                                    profile = qsTr("Remote")
+                                else if (StreamingPreferences.remoteDisplayProfile === StreamingPreferences.RDP_TV)
+                                    profile = qsTr("TV")
+
+                                if (StreamingPreferences.remoteDisplayState === StreamingPreferences.RDS_PENDING)
+                                    return qsTr("Applying %1...").arg(profile)
+                                if (StreamingPreferences.remoteDisplayState === StreamingPreferences.RDS_APPLIED)
+                                    return qsTr("%1 applied").arg(profile)
+                                if (StreamingPreferences.remoteDisplayState === StreamingPreferences.RDS_UNAVAILABLE)
+                                    return qsTr("Remote display controller unavailable")
+                                if (StreamingPreferences.remoteDisplayState === StreamingPreferences.RDS_FAILED)
+                                    return qsTr("%1 failed; the stream stayed connected").arg(profile)
+                                return qsTr("Commands use the encrypted Sunshine session")
+                            }
+                        }
+
+                        CheckBox {
+                            width: parent.width
+                            text: qsTr("Apply Remote when the stream starts")
+                            font.pointSize: 12
+                            checked: StreamingPreferences.applyRemoteOnConnect
+                            onClicked: {
+                                StreamingPreferences.applyRemoteOnConnect = checked
+                                StreamingPreferences.applyRemoteDisplayPolicy()
+                            }
+                        }
+
+                        CheckBox {
+                            width: parent.width
+                            text: qsTr("Restore Desk when the stream disconnects")
+                            font.pointSize: 12
+                            checked: StreamingPreferences.restoreDeskOnDisconnect
+                            onClicked: {
+                                StreamingPreferences.restoreDeskOnDisconnect = checked
+                                StreamingPreferences.applyRemoteDisplayPolicy()
+                            }
+                        }
+                    }
+                }
+
                 Label {
                     width: parent.width
                     id: bitrateTitle
@@ -1030,92 +1117,6 @@ Flickable {
         }
 
         GroupBox {
-            id: deckDisplayGroupBox
-            width: (parent.width - (parent.leftPadding + parent.rightPadding))
-            padding: 12
-            title: "<font color=\"skyblue\">" + qsTr("Remote Display") + "</font>"
-            font.pointSize: 12
-
-            Column {
-                anchors.fill: parent
-                spacing: 6
-
-                Row {
-                    spacing: 8
-
-                    Button {
-                        text: qsTr("Desk")
-                        enabled: window.streamingActive &&
-                                 StreamingPreferences.remoteDisplayState !== StreamingPreferences.RDS_PENDING
-                        onClicked: StreamingPreferences.applyRemoteDisplayProfile(StreamingPreferences.RDP_DESK)
-                    }
-
-                    Button {
-                        text: qsTr("Remote")
-                        enabled: window.streamingActive &&
-                                 StreamingPreferences.remoteDisplayState !== StreamingPreferences.RDS_PENDING
-                        onClicked: StreamingPreferences.applyRemoteDisplayProfile(StreamingPreferences.RDP_REMOTE)
-                    }
-
-                    Button {
-                        text: qsTr("TV")
-                        enabled: window.streamingActive &&
-                                 StreamingPreferences.remoteDisplayState !== StreamingPreferences.RDS_PENDING
-                        onClicked: StreamingPreferences.applyRemoteDisplayProfile(StreamingPreferences.RDP_TV)
-                    }
-                }
-
-                Label {
-                    width: parent.width
-                    visible: window.streamingActive
-                    font.pointSize: 9
-                    wrapMode: Text.Wrap
-                    text: {
-                        var profile = qsTr("Display")
-                        if (StreamingPreferences.remoteDisplayProfile === StreamingPreferences.RDP_DESK)
-                            profile = qsTr("Desk")
-                        else if (StreamingPreferences.remoteDisplayProfile === StreamingPreferences.RDP_REMOTE)
-                            profile = qsTr("Remote")
-                        else if (StreamingPreferences.remoteDisplayProfile === StreamingPreferences.RDP_TV)
-                            profile = qsTr("TV")
-
-                        if (StreamingPreferences.remoteDisplayState === StreamingPreferences.RDS_PENDING)
-                            return qsTr("Applying %1...").arg(profile)
-                        if (StreamingPreferences.remoteDisplayState === StreamingPreferences.RDS_APPLIED)
-                            return qsTr("%1 applied").arg(profile)
-                        if (StreamingPreferences.remoteDisplayState === StreamingPreferences.RDS_UNAVAILABLE)
-                            return qsTr("Remote display controller unavailable")
-                        if (StreamingPreferences.remoteDisplayState === StreamingPreferences.RDS_FAILED)
-                            return qsTr("%1 failed; the stream stayed connected").arg(profile)
-                        return qsTr("Commands use the encrypted Sunshine session")
-                    }
-                }
-
-                CheckBox {
-                    width: parent.width
-                    text: qsTr("Apply Remote when the stream starts")
-                    font.pointSize: 12
-                    checked: StreamingPreferences.applyRemoteOnConnect
-                    onClicked: {
-                        StreamingPreferences.applyRemoteOnConnect = checked
-                        StreamingPreferences.applyRemoteDisplayPolicy()
-                    }
-                }
-
-                CheckBox {
-                    width: parent.width
-                    text: qsTr("Restore Desk when the stream disconnects")
-                    font.pointSize: 12
-                    checked: StreamingPreferences.restoreDeskOnDisconnect
-                    onClicked: {
-                        StreamingPreferences.restoreDeskOnDisconnect = checked
-                        StreamingPreferences.applyRemoteDisplayPolicy()
-                    }
-                }
-            }
-        }
-
-        GroupBox {
 
             id: audioSettingsGroupBox
             width: (parent.width - (parent.leftPadding + parent.rightPadding))
@@ -1170,6 +1171,46 @@ Flickable {
                     // ::onActivated must be used, as it only listens for when the index is changed by a human
                     onActivated : {
                         StreamingPreferences.audioConfig = audioListModel.get(currentIndex).val
+                    }
+                }
+
+                Column {
+                    width: parent.width
+                    spacing: 5
+                    visible: StreamingPreferences.speakerSpatialAvailable ||
+                             StreamingPreferences.speakerSpatialMode !== 0
+
+                    Label {
+                        width: parent.width
+                        text: qsTr("Deck speaker sound")
+                        font.pointSize: 12
+                        wrapMode: Text.Wrap
+                    }
+
+                    ComboBox {
+                        width: parent.width
+                        model: [qsTr("Off"), qsTr("Spacious stereo"), qsTr("Virtual surround")]
+                        currentIndex: StreamingPreferences.speakerSpatialMode
+                        enabled: !StreamingPreferences.speakerSpatialBusy
+                        onActivated: StreamingPreferences.setSpeakerSpatial(currentIndex)
+                    }
+
+                    Label {
+                        width: parent.width
+                        font.pointSize: 9
+                        wrapMode: Text.Wrap
+                        text: StreamingPreferences.speakerSpatialBusy ? qsTr("Applying speaker mode...") :
+                              StreamingPreferences.speakerSpatialStatus
+                    }
+
+                    Label {
+                        width: parent.width
+                        font.pointSize: 9
+                        wrapMode: Text.Wrap
+                        visible: StreamingPreferences.speakerSpatialMode !== 0
+                        text: StreamingPreferences.speakerSpatialMode === 2 ?
+                              qsTr("Use 5.1 or 7.1 audio and reconnect for directional surround. Disable in-game headphone/3D audio. Best centred, about 35-75 cm away.") :
+                              qsTr("Wider stereo for built-in speakers. Best centred, about 35-75 cm away. Turn off if the game's own spatial audio sounds better.")
                     }
                 }
 
