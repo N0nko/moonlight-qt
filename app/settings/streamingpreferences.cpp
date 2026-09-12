@@ -102,21 +102,52 @@ StreamingPreferences::StreamingPreferences(QQmlEngine *qmlEngine)
             emit remoteDisplayStatusChanged();
         }
     });
+    m_SpeakerTuningDebounce.setSingleShot(true);
+    m_SpeakerTuningDebounce.setInterval(120);
+    connect(&m_SpeakerTuningDebounce, &QTimer::timeout, this, &StreamingPreferences::flushSpeakerSpatialTuning);
     reload();
 }
 
 void StreamingPreferences::refreshSpeakerSpatial()
 {
-    runSpeakerSpatial(-1);
+    runSpeakerSpatial({"status"});
 }
 
 void StreamingPreferences::setSpeakerSpatial(int mode)
 {
-    if (mode >= 0 && mode <= 2)
-        runSpeakerSpatial(mode);
+    if (mode >= 0 && mode <= 2 && !speakerSpatialBusy) {
+        m_SpeakerTuningPending = false;
+        m_SpeakerTuningDebounce.stop();
+        runSpeakerSpatial({"mode", QString::number(mode)});
+    }
 }
 
-void StreamingPreferences::runSpeakerSpatial(int mode)
+void StreamingPreferences::setSpeakerSpatialTuning(int width, int distance)
+{
+    if (!speakerSpatialTunable || speakerSpatialMode == 0)
+        return;
+    speakerSpatialWidth = qBound(50, width, 150);
+    speakerSpatialDistance = qBound(0, distance, 200);
+    m_SpeakerTuningPending = true;
+    m_SpeakerTuningDebounce.start();
+    emit speakerSpatialChanged();
+}
+
+void StreamingPreferences::resetSpeakerSpatialTuning()
+{
+    setSpeakerSpatialTuning(100, speakerSpatialMode == 1 ? 0 : 100);
+}
+
+void StreamingPreferences::flushSpeakerSpatialTuning()
+{
+    if (!m_SpeakerTuningPending || speakerSpatialBusy)
+        return;
+    m_SpeakerTuningPending = false;
+    runSpeakerSpatial({"tune", QString::number(speakerSpatialMode),
+                       QString::number(speakerSpatialWidth), QString::number(speakerSpatialDistance)});
+}
+
+void StreamingPreferences::runSpeakerSpatial(const QStringList& arguments)
 {
 #ifdef Q_OS_LINUX
     const QString helper = QCoreApplication::applicationDirPath() +
@@ -136,6 +167,8 @@ void StreamingPreferences::runSpeakerSpatial(int mode)
     connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {
             speakerSpatialBusy = false;
+            m_SpeakerTuningPending = false;
+            m_SpeakerTuningDebounce.stop();
             speakerSpatialStatus = tr("Could not start speaker helper; audio unchanged");
             emit speakerSpatialChanged();
             process->deleteLater();
@@ -146,27 +179,41 @@ void StreamingPreferences::runSpeakerSpatial(int mode)
         const auto document = QJsonDocument::fromJson(process->readAllStandardOutput());
         if (document.isObject()) {
             const auto state = document.object();
-            speakerSpatialMode = qBound(0, state.value("mode").toInt(), 2);
+            const int mode = qBound(0, state.value("mode").toInt(), 2);
+            if (mode != speakerSpatialMode || !state.value("tunable").toBool()) {
+                m_SpeakerTuningPending = false;
+                m_SpeakerTuningDebounce.stop();
+            }
+            speakerSpatialMode = mode;
             speakerSpatialAvailable = state.value("available").toBool();
+            speakerSpatialTunable = state.value("tunable").toBool();
+            if (!m_SpeakerTuningPending) {
+                speakerSpatialWidth = state.value("width").toInt(100);
+                speakerSpatialDistance = state.value("distance").toInt(100);
+            }
             speakerSpatialStatus = state.value("message").toString();
         }
         else {
+            m_SpeakerTuningPending = false;
+            m_SpeakerTuningDebounce.stop();
             speakerSpatialStatus = tr("Speaker helper failed; check the audio service before retrying");
         }
         speakerSpatialBusy = false;
         emit speakerSpatialChanged();
         process->deleteLater();
+        // Coalesce drags while the helper is busy; never lose the final position.
+        if (!m_SpeakerTuningDebounce.isActive())
+            flushSpeakerSpatialTuning();
     });
     QTimer::singleShot(60000, process, [process]() {
         if (process->state() != QProcess::NotRunning)
             process->kill();
     });
-    QStringList args {helper, mode < 0 ? "status" : "mode"};
-    if (mode >= 0)
-        args << QString::number(mode);
+    QStringList args {helper};
+    args << arguments;
     process->start("/usr/bin/python3", args);
 #else
-    Q_UNUSED(mode);
+    Q_UNUSED(arguments);
 #endif
 }
 

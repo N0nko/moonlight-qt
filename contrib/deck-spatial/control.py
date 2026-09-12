@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parent
 STATE = Path.home() / '.local/state/moonlight/deck-spatial'
 UNITFILE = Path.home() / '.config/systemd/user' / UNIT
 FILES = ('assets/stereo.wav', 'assets/surround.wav', 'assets/design.json',
+         'assets/stereo-room.wav', 'assets/surround-room.wav',
          'safety.lv2/manifest.ttl', 'safety.lv2/safety.ttl', 'safety.lv2/safety.so',
          'NOTICE')
 
@@ -47,11 +49,16 @@ def speaker_target(items):
     return targets[0]
 
 
-def graph(mode, payload, target):
+def defaults(mode):
+    return {'width': 100, 'distance': 0 if mode == 1 else 100}
+
+
+def graph(mode, payload, target, tuning=None):
     if mode not in (1, 2):
         raise ValueError('Unknown speaker mode')
     channels = ['FL', 'FR'] if mode == 1 else ['FL', 'FR', 'FC', 'LFE', 'RL', 'RR', 'SL', 'SR']
     count = len(channels)
+    tuning = defaults(mode) if tuning is None else tuning
     wav = str(payload / 'assets' / ('stereo.wav' if mode == 1 else 'surround.wav'))
     filters, links = [], []
     for i in range(count):
@@ -60,7 +67,7 @@ def graph(mode, payload, target):
             name = f'c{ear}_{i}'
             filters.append({'type': 'builtin', 'name': name, 'label': 'convolver',
                             'config': {'filename': wav, 'channel': ear * count + i,
-                                       'length': 512 if mode == 1 else (2047 if i in (4, 5) else 1023),
+                                       'length': 512 if mode == 1 else 1023,
                                        'blocksize': 64, 'tailsize': 256,
                                        'latency': .001 if mode == 1 else .002}})
             links.extend([{'output': f'in{i}:Out', 'input': name + ':In'},
@@ -70,8 +77,22 @@ def graph(mode, payload, target):
                         'control': {f'Gain {i + 1}': 1 for i in range(count)}})
         links.append({'output': f'mix{ear}:Out',
                       'input': 'safety:' + ('left' if ear == 0 else 'right')})
+        filters.append({'type': 'builtin', 'name': f'roommix{ear}', 'label': 'mixer',
+                        'control': {'Gain 1': 1, 'Gain 2': 1}})
+        for j, channel in enumerate((0, 1) if mode == 1 else (4, 5)):
+            room_name = f'room{ear}_{j}'
+            filters.append({'type': 'builtin', 'name': room_name, 'label': 'convolver',
+                            'config': {'filename': str(payload / 'assets' /
+                                        ('stereo-room.wav' if mode == 1 else 'surround-room.wav')),
+                                       'channel': ear * 2 + j, 'blocksize': 64, 'tailsize': 256,
+                                       'latency': .001 if mode == 1 else .002}})
+            links.extend([{'output': f'in{channel}:Out', 'input': room_name + ':In'},
+                          {'output': room_name + ':Out', 'input': f'roommix{ear}:In {j + 1}'}])
+        links.append({'output': f'roommix{ear}:Out',
+                      'input': 'safety:' + ('room_left' if ear == 0 else 'room_right')})
     filters.append({'type': 'lv2', 'name': 'safety',
-                    'plugin': 'urn:moonlight:deck-speaker-safety'})
+                    'plugin': 'urn:moonlight:deck-speaker-safety',
+                    'control': {key: value / 100 for key, value in tuning.items()}})
     return {
         'context.properties': {'log.level': 2},
         'context.spa-libs': {'audio.convert.*': 'audioconvert/libspa-audioconvert',
@@ -113,10 +134,11 @@ def owned_unit():
 
 def payload():
     report = json.loads((ROOT / 'assets/design.json').read_text())
-    if set(report['assets']) != {'stereo.wav', 'surround.wav'}:
+    asset_names = {'stereo.wav', 'surround.wav', 'stereo-room.wav', 'surround-room.wav'}
+    if set(report['assets']) != asset_names:
         raise RuntimeError('Incomplete speaker filter manifest')
     for name, digest in report['assets'].items():
-        if name not in ('stereo.wav', 'surround.wav'):
+        if name not in asset_names:
             raise RuntimeError('Invalid asset manifest')
         if hashlib.sha256((ROOT / 'assets' / name).read_bytes()).hexdigest() != digest:
             raise RuntimeError('Speaker filter checksum failed')
@@ -160,17 +182,82 @@ WantedBy=default.target
 '''
 
 
-def read_mode():
+def read_state():
+    state = {'mode': 0, 'profiles': {str(mode): defaults(mode) for mode in (1, 2)}}
     try:
-        value = json.loads((STATE / 'state.json').read_text())['mode']
-        return value if value in (0, 1, 2) else 0
-    except (OSError, ValueError, KeyError):
-        return 0
+        saved = json.loads((STATE / 'state.json').read_text())
+        if type(saved.get('mode')) is int and saved['mode'] in (0, 1, 2):
+            state['mode'] = saved['mode']
+        for mode in ('1', '2'):
+            for key, low, high in (('width', 50, 150), ('distance', 0, 200)):
+                value = saved.get('profiles', {}).get(mode, {}).get(key)
+                if type(value) is int and low <= value <= high:
+                    state['profiles'][mode][key] = value
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+    return state
+
+
+def read_mode():
+    return read_state()['mode']
+
+
+def live_controls(node):
+    controls = {}
+    for props in node.get('info', {}).get('params', {}).get('Props', []):
+        values = props.get('params', [])
+        controls.update(zip(values[::2], values[1::2]) if isinstance(values, list) else values)
+    return {key: round(100 * controls['safety:' + key]) for key in ('width', 'distance')
+            if isinstance(controls.get('safety:' + key), (int, float))
+            and math.isfinite(controls['safety:' + key])}
+
+
+def playing_sources(items, target):
+    destinations = {n['id'] for n in items if properties(n).get('node.name') in (target, NAME)}
+    linked = {int(properties(n)['link.output.node']) for n in items
+              if int(properties(n).get('link.input.node', -1)) in destinations}
+    return {str(properties(n).get('object.serial')) for n in items
+            if n['id'] in linked and n.get('info', {}).get('state') == 'running'
+            and properties(n).get('node.name') != NAME + '-output'}
+
+
+def wait_routing(expected_sources, timeout=3):
+    # A published sink alone is not proof of audio: WirePlumber can fail to link it.
+    deadline = time.monotonic() + timeout
+    while True:
+        items = nodes()
+        ids = {properties(n).get('node.name'): n['id'] for n in items
+               if n.get('type', '').endswith(':Node')}
+        target = speaker_target(items)
+        present = NAME in ids and NAME + '-output' in ids
+        # A failed link can make the source idle, so do not forget it on that transition.
+        sources = {n['id'] for n in items if str(properties(n).get('object.serial')) in expected_sources}
+        playing = {n['id'] for n in items if n['id'] in sources
+                   and n.get('info', {}).get('state') == 'running'}
+        connected = [(int(properties(n).get('link.output.node', -1)),
+                      int(properties(n).get('link.input.node', -1))) for n in items
+                     if n.get('info', {}).get('state') in ('active', 'paused')]
+        active = [(int(properties(n).get('link.output.node', -1)),
+                   int(properties(n).get('link.input.node', -1))) for n in items
+                  if n.get('info', {}).get('state') == 'active']
+        if present and (not sources or
+                        (connected.count((ids[NAME + '-output'], ids[target])) >= 2
+                         and all((source, ids[NAME]) in connected for source in sources)
+                         and (not playing or
+                              (active.count((ids[NAME + '-output'], ids[target])) >= 2
+                               and all((source, ids[NAME]) in active for source in playing))))):
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Speaker playback links did not activate')
+        time.sleep(.05)
 
 
 def status():
-    mode = read_mode()
+    state = read_state()
+    mode = state['mode']
     result = {'mode': mode, 'active': False, 'available': False, 'message': ''}
+    result.update(state['profiles'].get(str(mode), defaults(2)))
+    result['tunable'] = False
     try:
         if Path('/sys/class/dmi/id/product_name').read_text().strip() != 'Galileo':
             raise RuntimeError('Speaker processing supports Steam Deck OLED only')
@@ -180,6 +267,11 @@ def status():
         speaker_target(items)
         result['available'] = True
         result['active'] = any(properties(n).get('node.name') == NAME for n in items)
+        for node in items:
+            if properties(node).get('node.name') == NAME:
+                actual = live_controls(node)
+                result['tunable'] = len(actual) == 2
+                result.update(actual)
         result['message'] = ('Speaker filter ready; headphones and Bluetooth bypass it'
                              if result['active'] else
                              'Off; original speaker audio' if mode == 0 else
@@ -191,15 +283,20 @@ def status():
 
 def set_mode(mode):
     owned_unit()
+    state = read_state()
+    state['mode'] = mode
     if mode == 0:
         if UNITFILE.exists():
             command('/usr/bin/systemctl', '--user', 'disable', '--now', UNIT)
-        atomic(STATE / 'state.json', json.dumps({'mode': 0}))
+        atomic(STATE / 'state.json', json.dumps(state))
         return
     if not status()['available']:
         raise RuntimeError(status()['message'])
     data = payload()
-    config = json.dumps(graph(mode, data, speaker_target(nodes())), indent=2)
+    items = nodes()
+    target = speaker_target(items)
+    expected_sources = playing_sources(items, target)
+    config = json.dumps(graph(mode, data, target, state['profiles'][str(mode)]), indent=2)
     old = {p: p.read_text() if p.exists() else None
            for p in (UNITFILE, STATE / 'filter.conf', STATE / 'state.json')}
     was_active = command('/usr/bin/systemctl', '--user', 'is-active', '--quiet', UNIT, check=False).returncode == 0
@@ -207,21 +304,20 @@ def set_mode(mode):
     if (was_active and was_enabled and read_mode() == mode
             and old[UNITFILE] == unit_text(data) and old[STATE / 'filter.conf'] == config
             and any(properties(n).get('node.name') == NAME for n in nodes())):
-        return
+        try:
+            wait_routing(expected_sources, timeout=0)
+            return
+        except RuntimeError:
+            pass
     try:
         atomic(STATE / 'filter.conf', config)
         atomic(UNITFILE, unit_text(data))
         command('/usr/bin/systemctl', '--user', 'daemon-reload')
         command('/usr/bin/systemctl', '--user', 'reset-failed', UNIT, check=False)
         command('/usr/bin/systemctl', '--user', 'restart', UNIT)
-        # A bounded activation check only; no timer or poller remains running.
-        deadline = time.monotonic() + 3
-        while not any(properties(n).get('node.name') == NAME for n in nodes()):
-            if time.monotonic() >= deadline:
-                raise RuntimeError('Speaker graph did not start; previous mode restored')
-            time.sleep(.05)
+        wait_routing(expected_sources)
         command('/usr/bin/systemctl', '--user', 'enable', UNIT)
-        atomic(STATE / 'state.json', json.dumps({'mode': mode}))
+        atomic(STATE / 'state.json', json.dumps(state))
     except Exception:
         command('/usr/bin/systemctl', '--user', 'disable', '--now', UNIT, check=False)
         for path, content in old.items():
@@ -234,23 +330,80 @@ def set_mode(mode):
             command('/usr/bin/systemctl', '--user', 'enable', UNIT, check=False)
         if was_active:
             command('/usr/bin/systemctl', '--user', 'start', UNIT, check=False)
+            try:
+                wait_routing(expected_sources)
+            except (RuntimeError, subprocess.SubprocessError):
+                command('/usr/bin/systemctl', '--user', 'disable', '--now', UNIT, check=False)
+                state = read_state()
+                state['mode'] = 0
+                atomic(STATE / 'state.json', json.dumps(state))
+                raise RuntimeError('Speaker links failed; processing switched Off to restore original audio')
+        raise
+
+
+def set_tuning(mode, width, distance):
+    if mode not in (1, 2) or not 50 <= width <= 150 or not 0 <= distance <= 200:
+        raise ValueError('Speaker tuning outside safe range')
+    owned_unit()
+    state = read_state()
+    if state['mode'] != mode:
+        raise RuntimeError('Speaker mode changed; refresh the controls')
+    current = [n for n in nodes() if properties(n).get('node.name') == NAME]
+    if len(current) != 1 or len(live_controls(current[0])) != 2:
+        raise RuntimeError('Select a speaker mode once to load the new controls')
+    previous = live_controls(current[0])
+    wanted = {'width': width, 'distance': distance}
+    config_path = STATE / 'filter.conf'
+    old_config = config_path.read_text()
+    config = json.loads(old_config)
+    filters = config['context.modules'][-1]['args']['filter.graph']['nodes']
+    safety = next(n for n in filters if n['name'] == 'safety')
+    safety['control'] = {key: value / 100 for key, value in wanted.items()}
+
+    def apply(values):
+        command('/usr/bin/pw-cli', 'set-param', str(current[0]['id']), 'Props',
+                json.dumps({'params': [entry for key, value in values.items()
+                                       for entry in (f'safety:{key}', value / 100)]}))
+
+    try:
+        apply(wanted)
+        # Read back actual plugin controls, not merely the CLI exit status.
+        updated = [n for n in nodes() if n['id'] == current[0]['id']
+                   and properties(n).get('node.name') == NAME]
+        if len(updated) != 1 or live_controls(updated[0]) != wanted:
+            raise RuntimeError('Speaker controls were not applied')
+        atomic(config_path, json.dumps(config, indent=2))
+        state['profiles'][str(mode)] = wanted
+        atomic(STATE / 'state.json', json.dumps(state))
+    except Exception:
+        try:
+            apply(previous)
+        finally:
+            atomic(config_path, old_config)
         raise
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['status', 'mode'])
+    parser.add_argument('action', choices=['status', 'mode', 'tune'])
     parser.add_argument('value', type=int, choices=[0, 1, 2], nargs='?')
+    parser.add_argument('width', type=int, nargs='?')
+    parser.add_argument('distance', type=int, nargs='?')
     args = parser.parse_args()
     if args.action == 'mode' and args.value is None:
         parser.error('mode requires 0, 1 or 2')
+    if args.action == 'tune' and (args.value not in (1, 2) or args.width is None or args.distance is None):
+        parser.error('tune requires MODE WIDTH DISTANCE')
     try:
-        if args.action == 'mode':
+        if args.action in ('mode', 'tune'):
             import fcntl
             STATE.mkdir(parents=True, exist_ok=True)
             with (STATE / 'lock').open('w') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                set_mode(args.value)
+                if args.action == 'mode':
+                    set_mode(args.value)
+                else:
+                    set_tuning(args.value, args.width, args.distance)
         print(json.dumps(status()))
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         result = status()

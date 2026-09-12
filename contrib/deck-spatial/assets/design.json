@@ -36,7 +36,9 @@
     }
   ],
   "assets": {
+    "stereo-room.wav": "830429f016704eb714586c73e8d9fa5e1d72e4e0fae232c66a9a5386165f244d",
     "stereo.wav": "69198e59929c79dff9381f700697df82c15fe2fea5efd20632eebd8c66ac1dbe",
-    "surround.wav": "603145bf8cdaf5f2e0bca1e8c54968baf57000d86b22122c7f79c759d3a847b0"
+    "surround-room.wav": "ef205696853d166d461b7a4fa36cc6a44355e90419a0535c1823c4a635b798fa",
+    "surround.wav": "f1dc125716248e05605469b77b4ce66678e38229ba2411b08816149f791b8bfa"
   }
 }
