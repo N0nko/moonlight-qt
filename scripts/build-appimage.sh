@@ -59,6 +59,16 @@ pushd $BUILD_FOLDER
 make install || fail "Make install failed!"
 popd
 
+echo Bundling optional Steam Deck speaker processing
+SPATIAL_SOURCE=$SOURCE_ROOT/contrib/deck-spatial
+SPATIAL_DEPLOY=$DEPLOY_FOLDER/usr/share/moonlight/deck-spatial
+mkdir -p "$SPATIAL_DEPLOY/safety.lv2" || fail "Speaker directory failed!"
+cp "$SPATIAL_SOURCE/control.py" "$SPATIAL_SOURCE/NOTICE" "$SPATIAL_DEPLOY/" || fail "Speaker helper copy failed!"
+cp -r "$SPATIAL_SOURCE/assets" "$SPATIAL_DEPLOY/" || fail "Speaker assets copy failed!"
+cp "$SPATIAL_SOURCE/safety.lv2/"*.ttl "$SPATIAL_DEPLOY/safety.lv2/" || fail "Speaker manifest copy failed!"
+cc -std=c11 -O2 -fPIC -shared -Wall -Wextra -Werror "$SPATIAL_SOURCE/safety.c" -lm \
+  -o "$SPATIAL_DEPLOY/safety.lv2/safety.so" || fail "Speaker safety build failed!"
+
 export QML_SOURCES_PATHS=$SOURCE_ROOT/app/gui
 export QMAKE=qmake6
 

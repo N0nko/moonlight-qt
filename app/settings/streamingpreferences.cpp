@@ -9,6 +9,11 @@
 #include <QLocale>
 #include <QReadWriteLock>
 #include <QtMath>
+#include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QProcess>
+#include <QProcessEnvironment>
 
 #include <QtDebug>
 
@@ -98,6 +103,71 @@ StreamingPreferences::StreamingPreferences(QQmlEngine *qmlEngine)
         }
     });
     reload();
+}
+
+void StreamingPreferences::refreshSpeakerSpatial()
+{
+    runSpeakerSpatial(-1);
+}
+
+void StreamingPreferences::setSpeakerSpatial(int mode)
+{
+    if (mode >= 0 && mode <= 2)
+        runSpeakerSpatial(mode);
+}
+
+void StreamingPreferences::runSpeakerSpatial(int mode)
+{
+#ifdef Q_OS_LINUX
+    const QString helper = QCoreApplication::applicationDirPath() +
+            "/../share/moonlight/deck-spatial/control.py";
+    if (speakerSpatialBusy || !QFileInfo::exists(helper))
+        return;
+
+    auto* process = new QProcess(this);
+    auto env = QProcessEnvironment::systemEnvironment();
+    // The helper uses the host PipeWire, never AppImage-bundled libraries.
+    for (const auto& key : {"LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONHOME", "PYTHONPATH"})
+        env.remove(key);
+    env.insert("PATH", "/usr/bin:/bin");
+    process->setProcessEnvironment(env);
+    speakerSpatialBusy = true;
+    emit speakerSpatialChanged();
+    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            speakerSpatialBusy = false;
+            speakerSpatialStatus = tr("Could not start speaker helper; audio unchanged");
+            emit speakerSpatialChanged();
+            process->deleteLater();
+        }
+    });
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, process](int, QProcess::ExitStatus) {
+        const auto document = QJsonDocument::fromJson(process->readAllStandardOutput());
+        if (document.isObject()) {
+            const auto state = document.object();
+            speakerSpatialMode = qBound(0, state.value("mode").toInt(), 2);
+            speakerSpatialAvailable = state.value("available").toBool();
+            speakerSpatialStatus = state.value("message").toString();
+        }
+        else {
+            speakerSpatialStatus = tr("Speaker helper failed; check the audio service before retrying");
+        }
+        speakerSpatialBusy = false;
+        emit speakerSpatialChanged();
+        process->deleteLater();
+    });
+    QTimer::singleShot(60000, process, [process]() {
+        if (process->state() != QProcess::NotRunning)
+            process->kill();
+    });
+    QStringList args {helper, mode < 0 ? "status" : "mode"};
+    if (mode >= 0)
+        args << QString::number(mode);
+    process->start("/usr/bin/python3", args);
+#else
+    Q_UNUSED(mode);
+#endif
 }
 
 StreamingPreferences* StreamingPreferences::get(QQmlEngine *qmlEngine)

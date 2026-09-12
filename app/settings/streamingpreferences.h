@@ -25,6 +25,9 @@ public:
 
     Q_INVOKABLE bool applyDeckMicrophone();
 
+    Q_INVOKABLE void refreshSpeakerSpatial();
+    Q_INVOKABLE void setSpeakerSpatial(int mode);
+
     void reload();
 
     enum AudioConfig
@@ -183,6 +186,10 @@ public:
     Q_PROPERTY(bool gameOptimizations MEMBER gameOptimizations NOTIFY gameOptimizationsChanged)
     Q_PROPERTY(bool playAudioOnHost MEMBER playAudioOnHost NOTIFY playAudioOnHostChanged)
     Q_PROPERTY(bool deckMicrophone MEMBER deckMicrophone NOTIFY deckMicrophoneChanged)
+    Q_PROPERTY(int speakerSpatialMode MEMBER speakerSpatialMode NOTIFY speakerSpatialChanged)
+    Q_PROPERTY(bool speakerSpatialAvailable MEMBER speakerSpatialAvailable NOTIFY speakerSpatialChanged)
+    Q_PROPERTY(bool speakerSpatialBusy MEMBER speakerSpatialBusy NOTIFY speakerSpatialChanged)
+    Q_PROPERTY(QString speakerSpatialStatus MEMBER speakerSpatialStatus NOTIFY speakerSpatialChanged)
     Q_PROPERTY(bool multiController MEMBER multiController NOTIFY multiControllerChanged)
     Q_PROPERTY(bool enableMdns MEMBER enableMdns NOTIFY enableMdnsChanged)
     Q_PROPERTY(bool quitAppAfter MEMBER quitAppAfter NOTIFY quitAppAfterChanged)
@@ -237,6 +244,10 @@ public:
     bool gameOptimizations;
     bool playAudioOnHost;
     bool deckMicrophone;
+    int speakerSpatialMode = 0;
+    bool speakerSpatialAvailable = false;
+    bool speakerSpatialBusy = false;
+    QString speakerSpatialStatus;
     bool multiController;
     bool enableMdns;
     bool quitAppAfter;
@@ -285,6 +296,7 @@ signals:
     void gameOptimizationsChanged();
     void playAudioOnHostChanged();
     void deckMicrophoneChanged();
+    void speakerSpatialChanged();
     void multiControllerChanged();
     void unsupportedFpsChanged();
     void enableMdnsChanged();
@@ -324,6 +336,8 @@ private:
     explicit StreamingPreferences(QQmlEngine *qmlEngine);
 
     QString getSuffixFromLanguage(Language lang);
+
+    void runSpeakerSpatial(int mode);
 
     void handleLiveBitrateResult(quint32 requestId, int status,
                                  int appliedBitrateKbps);
