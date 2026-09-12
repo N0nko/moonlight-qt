@@ -165,6 +165,15 @@ class SpeakerTests(unittest.TestCase):
         with patch.object(spatial, 'nodes', return_value=items[:-1]):
             spatial.wait_routing({'104'}, timeout=0)  # Application really exited.
 
+    def test_bypass_barrier_requires_old_filter_removed_and_direct_route(self):
+        items = [node(TARGET), node('player', 'Stream/Output/Audio', id=4), link(4, 1, 10)]
+        with patch.object(spatial, 'nodes', return_value=items):
+            spatial.wait_routing({'104'}, timeout=0, enabled=False)
+        for incomplete in (items[:-1], items + [node(spatial.NAME, id=2)]):
+            with patch.object(spatial, 'nodes', return_value=incomplete):
+                with self.assertRaises(RuntimeError):
+                    spatial.wait_routing({'104'}, timeout=0, enabled=False)
+
     def test_off_and_ownership(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
@@ -215,7 +224,8 @@ class SpeakerTests(unittest.TestCase):
                     patch.object(spatial, 'status', return_value={'available': True}), \
                     patch.object(spatial, 'payload', return_value=ROOT), \
                     patch.object(spatial, 'nodes', return_value=[node(TARGET)]), \
-                    patch.object(spatial, 'wait_routing', side_effect=RuntimeError('broken links')):
+                    patch.object(spatial, 'wait_routing', side_effect=[None, RuntimeError('broken links'),
+                                                                    RuntimeError('broken links')]):
                 with self.assertRaisesRegex(RuntimeError, 'switched Off'):
                     spatial.set_mode(2)
                 self.assertEqual(spatial.read_mode(), 0)
