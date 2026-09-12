@@ -504,6 +504,9 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
     m_PresentationSyncRequested = params->enableVsync &&
                                   m_PacingMode != StreamingPreferences::PM_FIFO;
     m_PresentationFeedbackRequested = m_PresentationSyncRequested || m_PacingDiagnostics;
+    m_AdaptivePresentLeadEnabled = m_PresentationSyncRequested &&
+                                  m_PacingMode == StreamingPreferences::PM_CURRENT &&
+                                  qEnvironmentVariableIntValue("MOONLIGHT_ADAPTIVE_PRESENT_LEAD") == 1;
 
     bool leadOverrideValid = false;
     int leadOverrideUs = qEnvironmentVariableIntValue("MOONLIGHT_PRESENT_LEAD_US",
@@ -522,6 +525,9 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
                 m_PacingDiagnostics ? "enabled" : "disabled",
                 m_PacingMode != StreamingPreferences::PM_FIFO &&
                     m_PresentLeadOverrideUs >= 0 ? " (lead override active)" : "");
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Adaptive presentation lead: %s",
+                m_AdaptivePresentLeadEnabled && m_PresentLeadOverrideUs < 0 ?
+                    "experimental" : "disabled");
 #endif
 
     unsigned int instanceExtensionCount = 0;
@@ -793,6 +799,11 @@ void PlVkRenderer::resetPresentationTiming(VkSwapchainKHR swapchain)
     m_TimingMissedVblanks = 0;
     m_GuardSkippedVblanks = 0;
     m_MissingFeedbackLogged = false;
+    m_PresentationHistory.clear();
+    m_AdaptivePresentLead.reset();
+    m_ReadyToSubmitNs.clear();
+    m_ReadyToPresentNs.clear();
+    m_SubmitToPresentNs.clear();
     m_PresentationIntervalsNs.clear();
     m_PresentationErrorsNs.clear();
     m_SubmissionMarginsNs.clear();
@@ -800,6 +811,9 @@ void PlVkRenderer::resetPresentationTiming(VkSwapchainKHR swapchain)
         m_PresentationIntervalsNs.reserve(std::max(m_MaxVideoFps * 6, 360));
         m_PresentationErrorsNs.reserve(std::max(m_MaxVideoFps * 6, 360));
         m_SubmissionMarginsNs.reserve(std::max(m_MaxVideoFps * 6, 360));
+        m_ReadyToSubmitNs.reserve(std::max(m_MaxVideoFps * 6, 360));
+        m_ReadyToPresentNs.reserve(std::max(m_MaxVideoFps * 6, 360));
+        m_SubmitToPresentNs.reserve(std::max(m_MaxVideoFps * 6, 360));
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -838,6 +852,22 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
 
         receivedNewFeedback = true;
         m_LastFeedbackPresentId = timing.presentID;
+
+        const auto sample = m_PresentationHistory.take(timing.presentID, timing.actualPresentTime);
+        if (sample.id != 0) {
+            if (m_PacingDiagnostics && m_ReadyToPresentNs.size() <
+                    static_cast<size_t>(std::max(m_MaxVideoFps * 10, 600))) {
+                m_ReadyToSubmitNs.push_back(sample.submitNs - sample.readyNs);
+                m_ReadyToPresentNs.push_back(timing.actualPresentTime - sample.readyNs);
+                m_SubmitToPresentNs.push_back(timing.actualPresentTime - sample.submitNs);
+            }
+            if (m_AdaptivePresentLeadEnabled && m_PresentLeadOverrideUs < 0) {
+                const uint64_t baseline = std::clamp<uint64_t>(m_RefreshDurationNs / 8, 500000, 2000000);
+                m_AdaptivePresentLead.observe(sample.submitNs, timing.earliestPresentTime,
+                                             timing.actualPresentTime, timing.presentMargin,
+                                             m_RefreshDurationNs, baseline);
+            }
+        }
 
         if (m_LastActualPresentTimeNs != 0 &&
             timing.actualPresentTime > m_LastActualPresentTimeNs) {
@@ -983,6 +1013,28 @@ void PlVkRenderer::logPresentationTiming(uint64_t nowNs)
                 getPresentLeadTimeNs() / 1000000.0,
                 sortedIntervals.size());
 
+    if (!m_ReadyToPresentNs.empty()) {
+        std::sort(m_ReadyToSubmitNs.begin(), m_ReadyToSubmitNs.end());
+        std::sort(m_ReadyToPresentNs.begin(), m_ReadyToPresentNs.end());
+        std::sort(m_SubmitToPresentNs.begin(), m_SubmitToPresentNs.end());
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Presentation frame age: ready-to-submit p50/p99 %.3f/%.3f ms, "
+                    "ready-to-present p50/p95/p99/max %.3f/%.3f/%.3f/%.3f ms, "
+                    "submit-to-present p50/p99 %.3f/%.3f ms, samples %zu",
+                    percentile(m_ReadyToSubmitNs, 50) / 1000000.0,
+                    percentile(m_ReadyToSubmitNs, 99) / 1000000.0,
+                    percentile(m_ReadyToPresentNs, 50) / 1000000.0,
+                    percentile(m_ReadyToPresentNs, 95) / 1000000.0,
+                    percentile(m_ReadyToPresentNs, 99) / 1000000.0,
+                    m_ReadyToPresentNs.back() / 1000000.0,
+                    percentile(m_SubmitToPresentNs, 50) / 1000000.0,
+                    percentile(m_SubmitToPresentNs, 99) / 1000000.0,
+                    m_ReadyToPresentNs.size());
+    }
+    m_ReadyToSubmitNs.clear();
+    m_ReadyToPresentNs.clear();
+    m_SubmitToPresentNs.clear();
+
     m_TimingWindowStartNs = nowNs;
     m_TimingMissedVblanks = 0;
     m_GuardSkippedVblanks = 0;
@@ -1010,8 +1062,10 @@ uint64_t PlVkRenderer::getPresentLeadTimeNs() const
         return 0;
     }
 
-    return std::min<uint64_t>(
+    const uint64_t baseline = std::min<uint64_t>(
         std::max<uint64_t>(m_RefreshDurationNs / 8, 500000), 2000000);
+    return m_AdaptivePresentLeadEnabled ?
+               m_AdaptivePresentLead.lead(monotonicTimeNs(), m_RefreshDurationNs, baseline) : baseline;
 }
 
 const char* PlVkRenderer::getPacingModeName() const
@@ -1100,6 +1154,9 @@ void PlVkRenderer::preparePresent(VkSwapchainKHR swapchain,
         m_SourcePresentNs = 0;
     }
     m_PresentTime.presentID = m_NextPresentId++;
+    if (m_PacingDiagnostics || m_AdaptivePresentLeadEnabled) {
+        m_PresentationHistory.record(m_PresentTime.presentID, m_PendingDecodeReadyNs, nowNs);
+    }
     if (m_NextPresentId == 0) {
         m_NextPresentId = 1;
     }
@@ -1537,6 +1594,14 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     }
 
     // Submit the frame for display and swap buffers
+#ifdef Q_OS_LINUX
+    if (m_PacingDiagnostics || m_AdaptivePresentLeadEnabled) {
+        const uint64_t beforeUs = LiGetMicroseconds();
+        const uint64_t monoNs = monotonicTimeNs();
+        const uint64_t afterUs = LiGetMicroseconds();
+        m_PendingDecodeReadyNs = decodeReadyMonotonicNs(frame->pkt_dts, beforeUs, monoNs, afterUs);
+    }
+#endif
     m_HasPendingSwapchainFrame = false;
     if (!pl_swapchain_submit_frame(m_Swapchain)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -1577,6 +1642,9 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
 #endif
 
 UnmapExit:
+#ifdef Q_OS_LINUX
+    m_PendingDecodeReadyNs = 0;
+#endif
     // Delete any textures that need to be destroyed
     for (pl_tex& texture : texturesToDestroy) {
         pl_tex_destroy(m_Vulkan->gpu, &texture);

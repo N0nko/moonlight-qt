@@ -44,7 +44,7 @@ public:
 
     bool initialize(SDL_Window* window, int maxVideoFps, bool enablePacing,
                     bool enableFrameReserve, bool pacingDiagnostics,
-                    bool enableSourceTiming);
+                    bool enableSourceTiming, StreamingPreferences::PacingMode pacingMode);
 
     void signalVsync();
 
@@ -96,6 +96,7 @@ private:
     bool m_FrameReserveEnabled;
     bool m_FrameReservePrimed;
     bool m_PacingDiagnostics;
+    bool m_LatestFrameEnabled = false;
     std::atomic_bool m_SourceTimingEnabled{false};
     bool m_SourceTimingActive = false;
     SourceTimeline m_SourceTimeline;
