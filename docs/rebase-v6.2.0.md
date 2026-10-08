@@ -42,9 +42,41 @@ Git range-diff accounts for all 52 application commits and both common-c
 commits. Pacing, audio, microphone and lifecycle implementations otherwise
 match the previous fork. Patch-file context whitespace is pre-existing.
 
-Full AppImage and SDL callback verification runs in
-[GitHub Actions](https://github.com/N0nko/moonlight-qt/actions/runs/37847630031).
+Full AppImage and SDL callback verification passed in
+[GitHub Actions](https://github.com/N0nko/moonlight-qt/actions/runs/37847630031)
+at `99f187e2f0dd257a9a8f30b99344b66e3ebcf5b2`. Both setup and AppImage jobs
+succeeded; every dependency build, stream-policy test, binary build and upload
+step succeeded. Windows/macOS and Steam Link jobs were intentionally skipped.
+SDL tests passed legacy/adaptive buffering, stereo/surround, producer gaps and
+repeated teardown. CI completed at 2026-10-08 21:42:11 UTC.
 Do not infer live hardware success from build/test success.
+
+## Candidate delivery
+
+[Durable prerelease](https://github.com/N0nko/moonlight-qt/releases/tag/deck-v6.2.0-candidate-20261009)
+is labelled candidate/not live tested, is not latest, and tags the exact CI
+source commit above rather than subsequent documentation commits.
+Original CI artifact ID: `11580926283` (one-day retention).
+
+Downloaded ZIP paths were checked before extraction. The extracted AppImage
+contains SDL3, sdl2-compat, FFmpeg, libplacebo, Qt xcb and the spatial-audio
+controller, WAV assets and LV2 safety plugin. CI applies the retained libplacebo
+present-hook patch before building. AppRun probes host libva and selects the
+bundled fallback only when needed. WSL `ldd` found no missing Moonlight libraries.
+The optional offscreen `--version` smoke test could not start because only the
+xcb Qt platform plugin is packaged; no GUI/hardware runtime pass is claimed.
+
+Release assets include the unmodified CI AppImage, an AppDir tar.gz rooted at
+`squashfs-root` preserving executable modes and relative symlinks, and
+`SHA256SUMS`. Extract only into a new candidate directory and launch via AppRun;
+do not overwrite the old build or bypass libva selection. No installer is run.
+
+SHA-256:
+
+```text
+2c22316a95830205a6026cda9a6fac6c6abcaeffc14d498cb1a56e6304ea02dc  Moonlight-99f187-x86_64.AppImage
+bd18612d22128685580dc06d96d7cf522cb76c8be5b1b7005feee6983959edda  Moonlight-99f187-x86_64.AppDir.tar.gz
+```
 
 ## Device acceptance before promotion
 
