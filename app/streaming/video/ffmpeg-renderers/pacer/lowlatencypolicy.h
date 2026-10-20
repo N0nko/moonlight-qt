@@ -4,6 +4,14 @@
 #include <array>
 #include <cstdint>
 
+// Bound presentations still owned by the compositor, not GPU submissions.
+// Zero disables the limit. IDs start at one independently on each swapchain.
+inline uint64_t presentationToWaitFor(uint64_t submittedId, int maxPending)
+{
+    return maxPending > 0 && submittedId >= static_cast<uint64_t>(maxPending) ?
+        submittedId - static_cast<uint64_t>(maxPending) + 1 : 0;
+}
+
 inline int latestFramesToDrop(int depth, bool enabled)
 {
     return enabled && depth > 1 ? depth - 1 : 0;

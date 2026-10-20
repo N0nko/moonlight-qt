@@ -7,6 +7,16 @@
 
 int main()
 {
+    assert(presentationToWaitFor(0, 1) == 0);
+    assert(presentationToWaitFor(1, 1) == 1);
+    assert(presentationToWaitFor(99, 1) == 99);
+    assert(presentationToWaitFor(1, 2) == 0);
+    assert(presentationToWaitFor(2, 2) == 1);
+    assert(presentationToWaitFor(99, 2) == 98);
+    assert(presentationToWaitFor(99, 0) == 0);
+    assert(presentationToWaitFor(99, -1) == 0);
+    assert(presentationToWaitFor(std::numeric_limits<uint64_t>::max(), 2) ==
+           std::numeric_limits<uint64_t>::max() - 1);
     for (bool enabled : {false, true}) {
         for (int depth = 0; depth <= 3; ++depth) {
             std::deque<int> queue;

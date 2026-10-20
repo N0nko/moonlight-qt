@@ -396,6 +396,31 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
     }
 
 #ifdef Q_OS_LINUX
+    VkPhysicalDevicePresentWaitFeaturesKHR presentWaitFeatures = {};
+    VkPhysicalDevicePresentIdFeaturesKHR presentIdFeatures = {};
+    VkPhysicalDeviceFeatures2 presentationFeatures = {};
+    // Keep FIFO/VSync, but do not confuse GPU completion with presentation.
+    // Restrict the new budget to Low Latency; other profiles retain their policy.
+    bool pendingOverrideValid = false;
+    int pendingOverride = qEnvironmentVariableIntValue("MOONLIGHT_MAX_PENDING_PRESENTS",
+                                                       &pendingOverrideValid);
+    const int requestedPending = pendingOverrideValid && pendingOverride >= 0 && pendingOverride <= 2 ?
+        pendingOverride : 1;
+    if (m_PresentationSyncRequested && m_PacingMode == StreamingPreferences::PM_CURRENT &&
+        !m_SourceTimingEnabled && requestedPending != 0 &&
+        isExtensionSupportedByPhysicalDevice(device, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
+        isExtensionSupportedByPhysicalDevice(device, VK_KHR_PRESENT_WAIT_EXTENSION_NAME)) {
+        optionalDeviceExtensions.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+        optionalDeviceExtensions.push_back(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+        presentWaitFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR;
+        presentWaitFeatures.presentWait = VK_TRUE;
+        presentIdFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR;
+        presentIdFeatures.presentId = VK_TRUE;
+        presentIdFeatures.pNext = &presentWaitFeatures;
+        presentationFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        presentationFeatures.pNext = &presentIdFeatures;
+        vkParams.features = &presentationFeatures;
+    }
     if (m_PresentationFeedbackRequested) {
         optionalDeviceExtensions.push_back(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
     }
@@ -452,6 +477,27 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
         if (m_DisplayTimingAvailable) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Gamescope presentation timing available (VK_GOOGLE_display_timing)");
+            bool presentIdEnabled = false;
+            bool presentWaitEnabled = false;
+            for (auto feature = reinterpret_cast<const VkBaseInStructure*>(m_Vulkan->features);
+                 feature != nullptr; feature = feature->pNext) {
+                if (feature->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR) {
+                    presentIdEnabled = reinterpret_cast<const VkPhysicalDevicePresentIdFeaturesKHR*>(feature)->presentId;
+                }
+                if (feature->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR) {
+                    presentWaitEnabled = reinterpret_cast<const VkPhysicalDevicePresentWaitFeaturesKHR*>(feature)->presentWait;
+                }
+            }
+            if (vkParams.features != nullptr && presentIdEnabled && presentWaitEnabled) {
+                fn_vkWaitForPresentKHR = reinterpret_cast<PFN_vkWaitForPresentKHR>(
+                    fn_vkGetDeviceProcAddr(m_Vulkan->device, "vkWaitForPresentKHR"));
+                if (fn_vkWaitForPresentKHR != nullptr) {
+                    m_MaxPendingPresents = requestedPending;
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "Presentation queue budget: %d frame(s), FIFO/VSync retained",
+                                m_MaxPendingPresents);
+                }
+            }
         }
         else if (m_PresentationSyncRequested) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -736,6 +782,9 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
 
 bool PlVkRenderer::createSwapchain(int depth)
 {
+#ifdef Q_OS_LINUX
+    m_SubmittedPresentId = 0;
+#endif
     pl_swapchain_destroy(&m_Swapchain);
 
     pl_vulkan_swapchain_params vkSwapchainParams = {};
@@ -784,6 +833,7 @@ uint64_t PlVkRenderer::monotonicTimeNs()
 
 void PlVkRenderer::resetPresentationTiming(VkSwapchainKHR swapchain)
 {
+    m_SubmittedPresentId = 0;
     m_TimingSwapchain = swapchain;
     m_NextPresentId = 1;
     m_LastFeedbackPresentId = 0;
@@ -1162,11 +1212,51 @@ void PlVkRenderer::preparePresent(VkSwapchainKHR swapchain,
     }
     m_PresentTime.desiredPresentTime = desiredPresentTime;
 
+    if (m_MaxPendingPresents != 0) {
+        // libplacebo currently supplies no present IDs. Do not inject a second
+        // ID structure if a future version takes ownership of this extension.
+        for (auto next = reinterpret_cast<const VkBaseInStructure*>(presentInfo->pNext);
+             next != nullptr; next = next->pNext) {
+            if (next->sType == VK_STRUCTURE_TYPE_PRESENT_ID_KHR) {
+                m_MaxPendingPresents = 0;
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "Presentation IDs owned by renderer; using existing pacing");
+                break;
+            }
+        }
+        if (m_MaxPendingPresents != 0) {
+            ++m_SubmittedPresentId;
+            m_PresentIdInfo.pNext = presentInfo->pNext;
+            m_PresentIdInfo.swapchainCount = 1;
+            m_PresentIdInfo.pPresentIds = &m_SubmittedPresentId;
+            presentInfo->pNext = &m_PresentIdInfo;
+        }
+    }
+
     m_PresentTimesInfo.sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE;
     m_PresentTimesInfo.pNext = presentInfo->pNext;
     m_PresentTimesInfo.swapchainCount = 1;
     m_PresentTimesInfo.pTimes = &m_PresentTime;
     presentInfo->pNext = &m_PresentTimesInfo;
+}
+#endif
+
+#ifdef Q_OS_LINUX
+void PlVkRenderer::waitForPresentationBudget()
+{
+    const uint64_t waitId = presentationToWaitFor(m_SubmittedPresentId, m_MaxPendingPresents);
+    if (waitId == 0 || fn_vkWaitForPresentKHR == nullptr) {
+        return;
+    }
+    // Sleep in the driver, before acquiring/selecting the next frame. Bound the
+    // wait so an occluded or retired surface cannot stall recovery or shutdown.
+    const VkResult result = fn_vkWaitForPresentKHR(m_Vulkan->device, m_TimingSwapchain,
+                                                  waitId, 50000000ull);
+    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Presentation wait unavailable (%d); using existing FIFO pacing", result);
+        m_MaxPendingPresents = 0;
+    }
 }
 #endif
 
@@ -1407,6 +1497,10 @@ void PlVkRenderer::waitToRender()
         return;
     }
 
+#ifdef Q_OS_LINUX
+    waitForPresentationBudget();
+#endif
+
 #ifndef Q_OS_WIN32
     // With libplacebo's Vulkan backend, all swap_buffers does is wait for queued
     // presents to finish. This happens to be exactly what we want to do here, since
@@ -1604,6 +1698,10 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
 #endif
     m_HasPendingSwapchainFrame = false;
     if (!pl_swapchain_submit_frame(m_Swapchain)) {
+#ifdef Q_OS_LINUX
+        // The failed submission may have retired its swapchain.
+        m_SubmittedPresentId = 0;
+#endif
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "pl_swapchain_submit_frame() failed");
 

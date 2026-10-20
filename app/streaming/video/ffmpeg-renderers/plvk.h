@@ -89,6 +89,7 @@ private:
     void resetPresentationTiming(VkSwapchainKHR swapchain);
     void logPresentationTiming(uint64_t nowNs);
     uint64_t getPresentLeadTimeNs() const;
+    void waitForPresentationBudget();
     const char* getPacingModeName() const;
 #endif
 
@@ -193,6 +194,10 @@ private:
     PFN_vkGetDeviceProcAddr fn_vkGetDeviceProcAddr = nullptr;
     PFN_vkGetPastPresentationTimingGOOGLE fn_vkGetPastPresentationTimingGOOGLE = nullptr;
     PFN_vkGetRefreshCycleDurationGOOGLE fn_vkGetRefreshCycleDurationGOOGLE = nullptr;
+    PFN_vkWaitForPresentKHR fn_vkWaitForPresentKHR = nullptr;
+    int m_MaxPendingPresents = 0;
+    uint64_t m_SubmittedPresentId = 0;
+    VkPresentIdKHR m_PresentIdInfo = {VK_STRUCTURE_TYPE_PRESENT_ID_KHR};
     VkPresentTimeGOOGLE m_PresentTime = {};
     VkPresentTimesInfoGOOGLE m_PresentTimesInfo = {
         VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE
