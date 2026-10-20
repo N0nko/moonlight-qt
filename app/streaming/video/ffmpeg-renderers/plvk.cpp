@@ -784,6 +784,7 @@ bool PlVkRenderer::createSwapchain(int depth)
 {
 #ifdef Q_OS_LINUX
     m_SubmittedPresentId = 0;
+    m_HasPendingPresentation = false;
 #endif
     pl_swapchain_destroy(&m_Swapchain);
 
@@ -834,6 +835,7 @@ uint64_t PlVkRenderer::monotonicTimeNs()
 void PlVkRenderer::resetPresentationTiming(VkSwapchainKHR swapchain)
 {
     m_SubmittedPresentId = 0;
+    m_HasPendingPresentation = false;
     m_TimingSwapchain = swapchain;
     m_NextPresentId = 1;
     m_LastFeedbackPresentId = 0;
@@ -1104,6 +1106,13 @@ uint64_t PlVkRenderer::getPresentLeadTimeNs() const
         return (uint64_t)m_PresentLeadOverrideUs * 1000ull;
     }
 
+    // FIFO already schedules the image and the completion budget bounds its
+    // backlog. Rounding past another refresh here can add an unnecessary gap.
+    // Retain the original guard when this budget is unavailable or disabled.
+    if (m_MaxPendingPresents == 1) {
+        return 0;
+    }
+
     if (m_PacingMode == StreamingPreferences::PM_SMOOTH) {
         return 500000ull;
     }
@@ -1226,6 +1235,7 @@ void PlVkRenderer::preparePresent(VkSwapchainKHR swapchain,
         }
         if (m_MaxPendingPresents != 0) {
             ++m_SubmittedPresentId;
+            m_HasPendingPresentation = true;
             m_PresentIdInfo.pNext = presentInfo->pNext;
             m_PresentIdInfo.swapchainCount = 1;
             m_PresentIdInfo.pPresentIds = &m_SubmittedPresentId;
@@ -1245,7 +1255,7 @@ void PlVkRenderer::preparePresent(VkSwapchainKHR swapchain,
 void PlVkRenderer::waitForPresentationBudget()
 {
     const uint64_t waitId = presentationToWaitFor(m_SubmittedPresentId, m_MaxPendingPresents);
-    if (waitId == 0 || fn_vkWaitForPresentKHR == nullptr) {
+    if (!m_HasPendingPresentation || waitId == 0 || fn_vkWaitForPresentKHR == nullptr) {
         return;
     }
     // Sleep in the driver, before acquiring/selecting the next frame. Bound the
@@ -1499,6 +1509,11 @@ void PlVkRenderer::waitToRender()
 
 #ifdef Q_OS_LINUX
     waitForPresentationBudget();
+    // Resize/acquisition can retire the current swapchain even when it fails.
+    // Forget the wait before either call, but preserve the monotonically
+    // increasing ID in case the same swapchain survives. The next present hook
+    // publishes a new wait target (and resets IDs only for a new swapchain).
+    m_HasPendingPresentation = false;
 #endif
 
 #ifndef Q_OS_WIN32
@@ -1555,7 +1570,14 @@ void PlVkRenderer::cleanupRenderContext()
     // We have to submit a pending swapchain frame before shutting down
     // in order to release a mutex that pl_swapchain_start_frame() acquires.
     if (m_HasPendingSwapchainFrame) {
+#ifdef Q_OS_LINUX
+        m_HasPendingPresentation = false;
+#endif
         pl_swapchain_submit_frame(m_Swapchain);
+#ifdef Q_OS_LINUX
+        // Cleanup need not wait again; submission may have retired the surface.
+        m_HasPendingPresentation = false;
+#endif
         m_HasPendingSwapchainFrame = false;
     }
 }
@@ -1700,7 +1722,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     if (!pl_swapchain_submit_frame(m_Swapchain)) {
 #ifdef Q_OS_LINUX
         // The failed submission may have retired its swapchain.
-        m_SubmittedPresentId = 0;
+        m_HasPendingPresentation = false;
 #endif
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "pl_swapchain_submit_frame() failed");
