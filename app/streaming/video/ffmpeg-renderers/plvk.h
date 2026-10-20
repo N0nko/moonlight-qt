@@ -196,6 +196,8 @@ private:
     PFN_vkGetRefreshCycleDurationGOOGLE fn_vkGetRefreshCycleDurationGOOGLE = nullptr;
     PFN_vkWaitForPresentKHR fn_vkWaitForPresentKHR = nullptr;
     int m_MaxPendingPresents = 0;
+    bool m_AdaptivePresentationBudget = false;
+    PresentationCadenceBudget m_PresentationCadenceBudget;
     uint64_t m_SubmittedPresentId = 0;
     bool m_HasPendingPresentation = false;
     VkPresentIdKHR m_PresentIdInfo = {VK_STRUCTURE_TYPE_PRESENT_ID_KHR};

@@ -12,6 +12,55 @@ inline uint64_t presentationToWaitFor(uint64_t submittedId, int maxPending)
         submittedId - static_cast<uint64_t>(maxPending) + 1 : 0;
 }
 
+// A shallow FIFO is appropriate for steady full-rate delivery. Keep slack for
+// lower-rate/bursty sources; require two seconds of stable cadence to remove it.
+// Observed on the render thread using the host's wrapping 90 kHz RTP timestamps.
+class PresentationCadenceBudget {
+public:
+    int observe(uint32_t pts, uint64_t readyUs, int fps)
+    {
+        const uint32_t delta = pts - m_LastPts;
+        if (fps < 10 || fps > 1000) {
+            *this = {};
+            return 2;
+        }
+        if (!m_Valid || fps != m_Fps || readyUs < m_LastReadyUs ||
+            readyUs - m_LastReadyUs > 1000000 || delta > 90000) {
+            *this = {};
+            m_Valid = true;
+            m_Fps = fps;
+        }
+        else {
+            const uint32_t period = 90000 / fps;
+            const bool regular = delta >= period * 3 / 4 && delta <= period * 5 / 4;
+            m_StableFrames = regular ? std::min(m_StableFrames + 1, fps * 2) : 0;
+            m_IrregularFrames += !regular;
+            if (m_IrregularFrames >= 3) {
+                m_Budget = 2;
+            }
+            if (m_StableFrames >= fps * 2) {
+                m_Budget = 1;
+            }
+            if (++m_WindowFrames >= fps) {
+                m_WindowFrames = m_IrregularFrames = 0;
+            }
+        }
+        m_LastPts = pts;
+        m_LastReadyUs = readyUs;
+        return m_Budget;
+    }
+
+private:
+    bool m_Valid = false;
+    int m_Fps = 0;
+    int m_Budget = 2;
+    int m_StableFrames = 0;
+    int m_WindowFrames = 0;
+    int m_IrregularFrames = 0;
+    uint32_t m_LastPts = 0;
+    uint64_t m_LastReadyUs = 0;
+};
+
 inline int latestFramesToDrop(int depth, bool enabled)
 {
     return enabled && depth > 1 ? depth - 1 : 0;

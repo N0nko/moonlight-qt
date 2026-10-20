@@ -404,8 +404,8 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
     bool pendingOverrideValid = false;
     int pendingOverride = qEnvironmentVariableIntValue("MOONLIGHT_MAX_PENDING_PRESENTS",
                                                        &pendingOverrideValid);
-    const int requestedPending = pendingOverrideValid && pendingOverride >= 0 && pendingOverride <= 2 ?
-        pendingOverride : 1;
+    const bool fixedPendingBudget = pendingOverrideValid && pendingOverride >= 0 && pendingOverride <= 2;
+    const int requestedPending = fixedPendingBudget ? pendingOverride : 2;
     if (m_PresentationSyncRequested && m_PacingMode == StreamingPreferences::PM_CURRENT &&
         !m_SourceTimingEnabled && requestedPending != 0 &&
         isExtensionSupportedByPhysicalDevice(device, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
@@ -493,9 +493,11 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
                     fn_vkGetDeviceProcAddr(m_Vulkan->device, "vkWaitForPresentKHR"));
                 if (fn_vkWaitForPresentKHR != nullptr) {
                     m_MaxPendingPresents = requestedPending;
+                    m_AdaptivePresentationBudget = !fixedPendingBudget;
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "Presentation queue budget: %d frame(s), FIFO/VSync retained",
-                                m_MaxPendingPresents);
+                                "Presentation queue budget: %d frame(s), FIFO/VSync retained%s",
+                                m_MaxPendingPresents,
+                                m_AdaptivePresentationBudget ? "; source cadence adaptive" : "");
                 }
             }
         }
@@ -1591,6 +1593,20 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     if (!m_HasPendingSwapchainFrame) {
         return;
     }
+
+#ifdef Q_OS_LINUX
+    if (m_AdaptivePresentationBudget && m_MaxPendingPresents != 0) {
+        const int budget = frame->pts != AV_NOPTS_VALUE && frame->pkt_dts > 0 ?
+            m_PresentationCadenceBudget.observe(static_cast<uint32_t>(frame->pts),
+                                                frame->pkt_dts, m_MaxVideoFps) : 2;
+        if (budget != m_MaxPendingPresents) {
+            m_MaxPendingPresents = budget;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Presentation queue budget: %d frame(s) for %s source cadence",
+                        budget, budget == 1 ? "steady" : "irregular");
+        }
+    }
+#endif
 
     if (!mapAvFrameToPlacebo(frame, &mappedFrame)) {
         // This function logs internally

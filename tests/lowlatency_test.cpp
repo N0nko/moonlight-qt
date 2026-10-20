@@ -17,6 +17,38 @@ int main()
     assert(presentationToWaitFor(99, -1) == 0);
     assert(presentationToWaitFor(std::numeric_limits<uint64_t>::max(), 2) ==
            std::numeric_limits<uint64_t>::max() - 1);
+    PresentationCadenceBudget cadence;
+    uint32_t pts = 0xffff0000u;
+    uint64_t ready = 1000000;
+    assert(cadence.observe(pts, ready, 90) == 2);
+    // Includes RTP wraparound and normal source clock jitter.
+    for (int i = 0; i < 180; ++i) {
+        pts += i % 2 ? 1050 : 950;
+        ready += 11111;
+        assert(cadence.observe(pts, ready, 90) == (i == 179 ? 1 : 2));
+    }
+    // One delayed/dropped frame does not flap the policy.
+    pts += 2000; ready += 22222;
+    assert(cadence.observe(pts, ready, 90) == 1);
+    for (int i = 0; i < 90; ++i) {
+        pts += 1000; ready += 11111;
+        assert(cadence.observe(pts, ready, 90) == 1);
+    }
+    // Sustained half-rate delivery needs slack, without adding an app queue.
+    for (int i = 0; i < 90; ++i) {
+        pts += 2000; ready += 22222;
+        const int budget = cadence.observe(pts, ready, 90);
+        if (i >= 2) assert(budget == 2);
+    }
+    for (int i = 0; i < 180; ++i) {
+        pts += 1000; ready += 11111;
+        assert(cadence.observe(pts, ready, 90) == (i == 179 ? 1 : 2));
+    }
+    // Reconnect/clock discontinuity and a new stream rate restart conservatively.
+    assert(cadence.observe(100, ready + 2000000, 90) == 2);
+    assert(cadence.observe(1100, ready + 2011111, 45) == 2);
+    assert(cadence.observe(2100, ready, 45) == 2);
+    assert(cadence.observe(3100, ready + 11111, 0) == 2);
     for (bool enabled : {false, true}) {
         for (int depth = 0; depth <= 3; ++depth) {
             std::deque<int> queue;
