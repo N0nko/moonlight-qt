@@ -1111,7 +1111,7 @@ uint64_t PlVkRenderer::getPresentLeadTimeNs() const
     // FIFO already schedules the image and the completion budget bounds its
     // backlog. Rounding past another refresh here can add an unnecessary gap.
     // Retain the original guard when this budget is unavailable or disabled.
-    if (m_MaxPendingPresents == 1) {
+    if (m_MaxPendingPresents != 0) {
         return 0;
     }
 
