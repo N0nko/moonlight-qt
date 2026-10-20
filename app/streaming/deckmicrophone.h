@@ -32,7 +32,9 @@ private:
     void run();
     bool sendConfiguration(bool enabled,
                            std::uint32_t generation,
-                           std::uint32_t* requestId);
+                           std::uint32_t requestId);
+    // Caller holds m_StateMutex. Retry only within the current connection.
+    void scheduleNegotiationRetry(const char* reason);
     std::uint32_t nextRequestId();
 
     SDL_AudioDeviceID m_Device;
@@ -49,8 +51,10 @@ private:
     bool m_NegotiationRequested;
     bool m_NegotiationPending;
     std::uint32_t m_PendingRequestId;
+    unsigned int m_NegotiationAttempts;
     std::uint32_t m_Sequence;
     std::chrono::steady_clock::time_point m_NegotiationDeadline;
+    std::chrono::steady_clock::time_point m_NegotiationRetryAt;
     std::thread m_Thread;
     OpusEncoder* m_Encoder;
 };

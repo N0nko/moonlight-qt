@@ -273,7 +273,7 @@ IFFmpegRenderer* FFmpegVideoDecoder::getBackendRenderer()
     return m_BackendRenderer;
 }
 
-void FFmpegVideoDecoder::reset()
+void FFmpegVideoDecoder::stopDecoderThread()
 {
     // Terminate the decoder thread before doing anything else.
     // It might be touching things we're about to free.
@@ -284,6 +284,85 @@ void FFmpegVideoDecoder::reset()
         SDL_AtomicSet(&m_DecoderThreadShouldQuit, 0);
         m_DecoderThread = nullptr;
     }
+}
+
+bool FFmpegVideoDecoder::quiesceForRecovery()
+{
+    // Retain only the Deck's VAAPI/Vulkan path. Other backends keep their
+    // existing teardown behavior until their context lifetime is validated.
+    if (m_TestOnly || !m_VideoDecoderCtx || !m_FrontendRenderer || !m_BackendRenderer ||
+            m_FrontendRenderer->getRendererType() != IFFmpegRenderer::RendererType::Vulkan ||
+            m_BackendRenderer->getRendererType() != IFFmpegRenderer::RendererType::VAAPI) {
+        return false;
+    }
+    if (m_QuiescedForRecovery) {
+        return true;
+    }
+    stopDecoderThread();
+    delete m_Pacer;
+    m_Pacer = nullptr;
+    avcodec_flush_buffers(m_VideoDecoderCtx);
+    m_FramesIn = m_FramesOut = 0;
+    m_FrameInfoQueue.clear();
+    m_LastFrameNumber = 0;
+    m_ConsecutiveFailedDecodes = 0;
+    m_QuiescedForRecovery = true;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Retaining Vulkan presentation surface during stream recovery");
+    return true;
+}
+
+bool FFmpegVideoDecoder::resumeAfterRecovery(int format, int width, int height, int fps,
+                                            DecoderFramePresentedCallback callback, void* context)
+{
+    if (!m_QuiescedForRecovery || format != m_RecoveryParams.videoFormat ||
+            width != m_RecoveryParams.width || height != m_RecoveryParams.height ||
+            fps != m_RecoveryParams.frameRate) {
+        return false;
+    }
+    // Every connection has a fresh frame sequence and source clock. Do not
+    // count the outage or old timestamps as dropped frames/pacing samples.
+    m_LastPresentationUs = m_LastFirstPacketUs = m_LastCompletedFrameUs = m_LastDecodeReadyUs = 0;
+    m_DiagnosticLastFrameNumber = 0;
+    m_DiagnosticFrameGaps = 0;
+    m_DiagnosticSourceIntervalsUs.clear();
+    m_DiagnosticFirstPacketIntervalsUs.clear();
+    m_DiagnosticCompletedFrameIntervalsUs.clear();
+    m_DiagnosticReassemblyUs.clear();
+    m_DiagnosticHostProcessingUs.clear();
+    m_DiagnosticDecodeUs.clear();
+    m_DiagnosticDecodeReadyIntervalsUs.clear();
+    m_PacingDiagnosticWindowStartUs = LiGetMicroseconds();
+    SDL_zero(m_ActiveWndVideoStats);
+    SDL_zero(m_LastWndVideoStats);
+    m_ActiveWndVideoStats.measurementStartUs = LiGetMicroseconds();
+    m_Pacer = new Pacer(m_FrontendRenderer, &m_ActiveWndVideoStats, callback, context);
+    const auto& params = m_RecoveryParams;
+    if (!m_Pacer->initialize(params.window, params.frameRate,
+                             params.enableFramePacing || (params.enableVsync && (m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_FORCE_PACING)),
+                             params.enableFrameReserve, params.pacingDiagnostics,
+                             params.enableSourceTiming, params.pacingMode)) {
+        delete m_Pacer;
+        m_Pacer = nullptr;
+        return false;
+    }
+    m_FrontendRenderer->prepareToRender();
+    m_DecoderThread = SDL_CreateThread(FFmpegVideoDecoder::decoderThreadProcThunk, "FFDecoder", this);
+    if (!m_DecoderThread) {
+        delete m_Pacer;
+        m_Pacer = nullptr;
+        return false;
+    }
+    m_QuiescedForRecovery = false;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Resumed decoding on the retained Vulkan presentation surface");
+    return true;
+}
+
+void FFmpegVideoDecoder::reset()
+{
+    stopDecoderThread();
+    m_QuiescedForRecovery = false;
 
     m_FramesIn = m_FramesOut = 0;
     m_FrameInfoQueue.clear();
@@ -1788,6 +1867,7 @@ bool FFmpegVideoDecoder::tryInitializeNonHwAccelDecoder(PDECODER_PARAMETERS para
 
 bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
 {
+    m_RecoveryParams = *params;
     m_PacingDiagnostics = params->pacingDiagnostics;
     if (m_PacingDiagnostics) {
         m_PacingDiagnosticWindowStartUs = LiGetMicroseconds();
@@ -2429,6 +2509,9 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
 void FFmpegVideoDecoder::renderFrameOnMainThread()
 {
-    m_Pacer->renderOnMainThread();
+    // Frame-ready events from the old transport may remain in SDL's queue.
+    if (m_Pacer) {
+        m_Pacer->renderOnMainThread();
+    }
 }
 

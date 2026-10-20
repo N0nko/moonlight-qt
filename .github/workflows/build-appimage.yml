@@ -158,6 +158,11 @@ jobs:
           cc -std=c11 -O2 -Wall -Wextra -Werror tests/speakersafety_test.c -lm -o /tmp/speakersafety-test
           /tmp/speakersafety-test
           sudo ldconfig
+          c++ -std=c++17 -Wall -Wextra -Werror -pthread \
+            -Itests/deckmicrophone_stubs -Iapp \
+            tests/deckmicrophone_test.cpp app/streaming/deckmicrophone.cpp \
+            -lopus -o /tmp/deckmicrophone-test
+          /tmp/deckmicrophone-test
           c++ -std=c++17 -Wall -Wextra -Werror \
             app/streaming/lifecycle/recoverypolicy.cpp \
             app/streaming/lifecycle/recoverysettings.cpp \

@@ -110,8 +110,14 @@ void Session::stopConnectionForRecovery()
     // devices share SDL's process-global audio subsystem.
     stopDeckMicrophone();
 
-    // Pull-based renderers must be gone before common-c tears down its queues.
-    destroyVideoDecoder();
+    // Stop queue consumers before common-c tears down the transport, but keep
+    // compatible renderers alive so Gamescope can retain the last image.
+    SDL_LockMutex(m_DecoderLock);
+    if (m_VideoDecoder && !m_VideoDecoder->quiesceForRecovery()) {
+        delete m_VideoDecoder;
+        m_VideoDecoder = nullptr;
+    }
+    SDL_UnlockMutex(m_DecoderLock);
     LiStopConnection();
 
     m_AudioSampleCount = 0;
@@ -423,7 +429,16 @@ bool Session::processRecoveryEvents()
                 return false;
             }
 
-            if (!recreateVideoDecoder(false, Session::drFramePresented, this)) {
+            SDL_LockMutex(m_DecoderLock);
+            const bool retained = m_VideoDecoder && m_VideoDecoder->resumeAfterRecovery(
+                        m_ActiveVideoFormat, m_ActiveVideoWidth, m_ActiveVideoHeight,
+                        m_ActiveVideoFrameRate, Session::drFramePresented, this);
+            SDL_UnlockMutex(m_DecoderLock);
+            if (retained) {
+                LiRequestIdrFrame();
+                m_VideoDecoder->setHdrMode(LiGetCurrentHostDisplayHdrMode());
+            }
+            else if (!recreateVideoDecoder(false, Session::drFramePresented, this)) {
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                              "Failed to recreate the decoder during recovery");
                 stopConnectionForRecovery();

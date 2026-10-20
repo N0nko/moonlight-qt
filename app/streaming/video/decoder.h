@@ -85,4 +85,9 @@ public:
     virtual void renderFrameOnMainThread() = 0;
     virtual void setHdrMode(bool enabled) = 0;
     virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info) = 0;
+    // Stop all consumers of common-c queues while retaining the displayed image.
+    // Unsupported backends fall back to full decoder recreation.
+    virtual bool quiesceForRecovery() { return false; }
+    virtual bool resumeAfterRecovery(int, int, int, int,
+                                     DecoderFramePresentedCallback, void*) { return false; }
 };

@@ -31,6 +31,9 @@ public:
     virtual void renderFrameOnMainThread() override;
     virtual void setHdrMode(bool enabled) override;
     virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info) override;
+    bool quiesceForRecovery() override;
+    bool resumeAfterRecovery(int format, int width, int height, int fps,
+                             DecoderFramePresentedCallback callback, void* context) override;
 
     virtual IFFmpegRenderer* getBackendRenderer();
 
@@ -95,6 +98,7 @@ private:
     static bool isSeparateTestDecoderRequired(const AVCodec* decoder);
 
     void reset();
+    void stopDecoderThread();
 
     void writeBuffer(PLENTRY entry, int& offset);
 
@@ -156,6 +160,8 @@ private:
     TestMode m_CurrentTestMode;
     SDL_Thread* m_DecoderThread;
     SDL_atomic_t m_DecoderThreadShouldQuit;
+    DECODER_PARAMETERS m_RecoveryParams {};
+    bool m_QuiescedForRecovery = false;
 
     // Data buffers in the queued DU are not valid
     QQueue<DECODE_UNIT> m_FrameInfoQueue;
