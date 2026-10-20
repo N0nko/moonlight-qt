@@ -12,6 +12,7 @@
 #include <libplacebo/vulkan.h>
 
 #include <array>
+#include <atomic>
 #include <vector>
 
 #ifdef Q_OS_DARWIN
@@ -46,6 +47,9 @@ public:
     virtual bool initialize(PDECODER_PARAMETERS params) override;
     virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) override;
     virtual void renderFrame(AVFrame* frame) override;
+#ifdef Q_OS_LINUX
+    virtual void observeDecodedFrame(const AVFrame* frame, int fps) override;
+#endif
     virtual bool testRenderFrame(AVFrame* frame) override;
     virtual void waitToRender() override;
     virtual bool getSourcePresentationSlot(PresentationSlot& slot) override;
@@ -197,7 +201,9 @@ private:
     PFN_vkWaitForPresentKHR fn_vkWaitForPresentKHR = nullptr;
     int m_MaxPendingPresents = 0;
     bool m_AdaptivePresentationBudget = false;
+    // Policy belongs to the decoder thread; only its decision crosses threads.
     PresentationCadenceBudget m_PresentationCadenceBudget;
+    std::atomic<int> m_SourcePresentationBudget{2};
     uint64_t m_SubmittedPresentId = 0;
     bool m_HasPendingPresentation = false;
     VkPresentIdKHR m_PresentIdInfo = {VK_STRUCTURE_TYPE_PRESENT_ID_KHR};

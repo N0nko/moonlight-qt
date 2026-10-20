@@ -1584,6 +1584,25 @@ void PlVkRenderer::cleanupRenderContext()
     }
 }
 
+#ifdef Q_OS_LINUX
+void PlVkRenderer::observeDecodedFrame(const AVFrame* frame, int fps)
+{
+    // This flag is fixed during initialization, before decoder/render threads
+    // start. Do not read the render-thread-owned active budget here.
+    if (m_AdaptivePresentationBudget) {
+        int budget = 2;
+        if (frame->pts != AV_NOPTS_VALUE && frame->pkt_dts > 0) {
+            budget = m_PresentationCadenceBudget.observe(static_cast<uint32_t>(frame->pts),
+                                                         frame->pkt_dts, fps);
+        }
+        else {
+            m_PresentationCadenceBudget = {};
+        }
+        m_SourcePresentationBudget.store(budget, std::memory_order_relaxed);
+    }
+}
+#endif
+
 void PlVkRenderer::renderFrame(AVFrame *frame)
 {
     pl_frame mappedFrame, targetFrame;
@@ -1596,9 +1615,9 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
 
 #ifdef Q_OS_LINUX
     if (m_AdaptivePresentationBudget && m_MaxPendingPresents != 0) {
-        const int budget = frame->pts != AV_NOPTS_VALUE && frame->pkt_dts > 0 ?
-            m_PresentationCadenceBudget.observe(static_cast<uint32_t>(frame->pts),
-                                                frame->pkt_dts, m_MaxVideoFps) : 2;
+        // Observe every decoded source frame, not just selected presentations:
+        // our own queue adjustment can skip frames and must not drive cadence.
+        const int budget = m_SourcePresentationBudget.load(std::memory_order_relaxed);
         if (budget != m_MaxPendingPresents) {
             m_MaxPendingPresents = budget;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,

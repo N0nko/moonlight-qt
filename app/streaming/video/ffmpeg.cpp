@@ -2194,6 +2194,7 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         stale = m_DropStaleDecodedFrames &&
                                 staleDecodedFrame(du.enqueueTimeUs, decodeReadyUs, m_StreamFps);
                     }
+                    m_FrontendRenderer->observeDecodedFrame(frame, m_StreamFps);
                     m_ActiveWndVideoStats.decodedFrames++;
                     m_ConsecutiveFailedDecodes = 0;
                     if (stale && (m_FramesIn != m_FramesOut || LiGetPendingVideoFrames() > 0)) {

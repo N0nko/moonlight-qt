@@ -162,6 +162,10 @@ public:
     virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) = 0;
     virtual void renderFrame(AVFrame* frame) = 0;
 
+    // Decoder-thread observation, before stale-frame or pacer selection drops.
+    // Implementations must synchronize any state consumed by the render thread.
+    virtual void observeDecodedFrame(const AVFrame*, int) {}
+
     enum class InitFailureReason
     {
         Unknown,

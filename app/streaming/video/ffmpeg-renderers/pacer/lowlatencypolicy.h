@@ -14,7 +14,8 @@ inline uint64_t presentationToWaitFor(uint64_t submittedId, int maxPending)
 
 // A shallow FIFO is appropriate for steady full-rate delivery. Keep slack for
 // lower-rate/bursty sources; require two seconds of stable cadence to remove it.
-// Observed on the render thread using the host's wrapping 90 kHz RTP timestamps.
+// Observed on the decoder thread before selection drops, using the host's
+// wrapping 90 kHz RTP timestamps. Publish only the decision to the render thread.
 class PresentationCadenceBudget {
 public:
     int observe(uint32_t pts, uint64_t readyUs, int fps)
