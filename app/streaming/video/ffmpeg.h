@@ -162,6 +162,8 @@ private:
     SDL_atomic_t m_DecoderThreadShouldQuit;
     DECODER_PARAMETERS m_RecoveryParams {};
     bool m_QuiescedForRecovery = false;
+    bool m_DropStaleDecodedFrames = false;
+    unsigned int m_CatchupDroppedFrames = 0;
 
     // Data buffers in the queued DU are not valid
     QQueue<DECODE_UNIT> m_FrameInfoQueue;

@@ -14,6 +14,7 @@ extern "C" {
 
 #include "ffmpeg-renderers/sdlvid.h"
 #include "ffmpeg-renderers/genhwaccel.h"
+#include "ffmpeg-renderers/pacer/lowlatencypolicy.h"
 
 #ifdef Q_OS_WIN32
 #include "ffmpeg-renderers/dxva2.h"
@@ -309,6 +310,7 @@ bool FFmpegVideoDecoder::quiesceForRecovery()
     m_FrameInfoQueue.clear();
     m_LastFrameNumber = 0;
     m_ConsecutiveFailedDecodes = 0;
+    m_CatchupDroppedFrames = 0;
     m_QuiescedForRecovery = true;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Retaining Vulkan presentation surface during stream recovery");
@@ -1871,6 +1873,10 @@ bool FFmpegVideoDecoder::tryInitializeNonHwAccelDecoder(PDECODER_PARAMETERS para
 bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
 {
     m_RecoveryParams = *params;
+#ifdef Q_OS_LINUX
+    m_DropStaleDecodedFrames = params->pacingMode == StreamingPreferences::PM_CURRENT &&
+                              !params->enableFrameReserve && !params->enableSourceTiming;
+#endif
     m_PacingDiagnostics = params->pacingDiagnostics;
     if (m_PacingDiagnostics) {
         m_PacingDiagnosticWindowStartUs = LiGetMicroseconds();
@@ -2170,6 +2176,39 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     }
 #endif
 
+                    // Preserve codec references while catching up, but avoid
+                    // mapping/rendering stale output when newer input is ready.
+                    // In the normal path this is only an age comparison; the
+                    // transport queue is queried only for an already-old frame.
+                    const uint64_t decodeReadyUs = LiGetMicroseconds();
+                    frame->pkt_dts = decodeReadyUs;
+                    frame->pts = AV_NOPTS_VALUE;
+                    bool stale = false;
+                    if (!m_FrameInfoQueue.isEmpty()) {
+                        const DECODE_UNIT du = m_FrameInfoQueue.dequeue();
+                        m_ActiveWndVideoStats.totalDecodeTimeUs += decodeReadyUs - du.enqueueTimeUs;
+                        if (m_PacingDiagnostics) {
+                            recordPacingFrameDecoded(du, decodeReadyUs);
+                        }
+                        frame->pts = static_cast<int64_t>(du.rtpTimestamp);
+                        stale = m_DropStaleDecodedFrames &&
+                                staleDecodedFrame(du.enqueueTimeUs, decodeReadyUs, m_StreamFps);
+                    }
+                    m_ActiveWndVideoStats.decodedFrames++;
+                    m_ConsecutiveFailedDecodes = 0;
+                    if (stale && (m_FramesIn != m_FramesOut || LiGetPendingVideoFrames() > 0)) {
+                        ++m_CatchupDroppedFrames;
+                        ++m_ActiveWndVideoStats.pacerDroppedFrames;
+                        av_frame_free(&frame);
+                        continue;
+                    }
+                    if (m_CatchupDroppedFrames != 0) {
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "Video caught up: skipped presentation of %u stale decoded frames",
+                                    m_CatchupDroppedFrames);
+                        m_CatchupDroppedFrames = 0;
+                    }
+
                     // Attach HDR metadata to the frame if it's not already present. We will defer to
                     // any metadata contained in the bitstream itself since that is guaranteed to be
                     // correctly synchronized to each frame, unlike our async HDR metadata message.
@@ -2303,30 +2342,6 @@ void FFmpegVideoDecoder::decoderThreadProc()
 
                     // Restore default log level after a successful decode
                     av_log_set_level(AV_LOG_INFO);
-
-                    // Capture a frame timestamp to measure pacing delay.
-                    uint64_t decodeReadyUs = LiGetMicroseconds();
-                    frame->pkt_dts = decodeReadyUs;
-                    frame->pts = AV_NOPTS_VALUE;
-
-                    if (!m_FrameInfoQueue.isEmpty()) {
-                        // Data buffers in the DU are not valid here!
-                        DECODE_UNIT du = m_FrameInfoQueue.dequeue();
-
-                        // Count time in avcodec_send_packet() and avcodec_receive_frame()
-                        // as time spent decoding. Also count time spent in the decode unit
-                        // queue because that's directly caused by decoder latency.
-                        m_ActiveWndVideoStats.totalDecodeTimeUs += (decodeReadyUs - du.enqueueTimeUs);
-
-                        if (m_PacingDiagnostics) {
-                            recordPacingFrameDecoded(du, decodeReadyUs);
-                        }
-
-                        // Store the presentation time (90 kHz timebase)
-                        frame->pts = (int64_t)du.rtpTimestamp;
-                    }
-
-                    m_ActiveWndVideoStats.decodedFrames++;
 
                     // Queue the frame for rendering (or render now if pacer is disabled)
                     m_Pacer->submitFrame(frame);

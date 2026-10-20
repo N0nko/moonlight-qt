@@ -9,6 +9,17 @@ inline int latestFramesToDrop(int depth, bool enabled)
     return enabled && depth > 1 ? depth - 1 : 0;
 }
 
+// Only discard presentation of a fully decoded frame. Encoded reference frames
+// must still be decoded, and the caller must retain the last available picture.
+inline bool staleDecodedFrame(uint64_t queuedUs, uint64_t readyUs, int fps)
+{
+    if (queuedUs == 0 || readyUs < queuedUs || fps <= 0) {
+        return false;
+    }
+    const uint64_t maxAgeUs = std::max<uint64_t>(50000, 3000000ull / fps);
+    return readyUs - queuedUs > maxAgeUs;
+}
+
 // Bridge the decode clock to presentation MONOTONIC using a bracketed sample.
 inline uint64_t decodeReadyMonotonicNs(int64_t readyUs, uint64_t beforeUs,
                                       uint64_t monoNs, uint64_t afterUs)

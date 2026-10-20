@@ -18,6 +18,25 @@ int main()
         }
     }
     assert(latestFramesToDrop(-1, true) == 0);
+    assert(!staleDecodedFrame(1000000, 1050000, 90));
+    assert(staleDecodedFrame(1000000, 1050001, 90));
+    assert(!staleDecodedFrame(1000000, 1099999, 30));
+    assert(staleDecodedFrame(1000000, 1100001, 30));
+    assert(!staleDecodedFrame(1000000, 1100000, 24));
+    assert(!staleDecodedFrame(1000000, 999999, 90));
+    assert(!staleDecodedFrame(0, 1000000, 90));
+    assert(!staleDecodedFrame(1000000, 2000000, 0));
+    // A reconnect backlog is decoded in order for reference correctness,
+    // but obsolete pictures need not be presented one by one.
+    unsigned skipped = 0;
+    unsigned shown = 0;
+    for (unsigned i = 0; i < 15; ++i) {
+        const uint64_t queued = 1000000 + i * 11111;
+        const uint64_t decoded = 1200000 + i * 1000;
+        if (staleDecodedFrame(queued, decoded, 90) && i != 14) ++skipped;
+        else ++shown;
+    }
+    assert(skipped == 14 && shown == 1);
     assert(decodeReadyMonotonicNs(900, 1000, 9000000, 1020) == 8890000);
     assert(decodeReadyMonotonicNs(900, 1000, 9000000, 1300) == 0);
     assert(decodeReadyMonotonicNs(900, 1000, 9000000, 999) == 0);
