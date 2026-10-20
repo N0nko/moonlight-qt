@@ -299,6 +299,9 @@ bool FFmpegVideoDecoder::quiesceForRecovery()
         return true;
     }
     stopDecoderThread();
+    if (m_Pacer) {
+        m_Pacer->preserveLastFrameOnStop();
+    }
     delete m_Pacer;
     m_Pacer = nullptr;
     avcodec_flush_buffers(m_VideoDecoderCtx);

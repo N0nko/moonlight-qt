@@ -84,7 +84,7 @@ Pacer::~Pacer()
     else {
         // Notify the renderer that it is being destroyed soon
         // NB: This must happen on the same thread that calls renderFrame().
-        m_VsyncRenderer->cleanupRenderContext();
+        cleanupRenderContext();
     }
 
     // Delete any remaining unconsumed frames
@@ -242,7 +242,7 @@ int Pacer::renderThread(void* context)
 
     // Notify the renderer that it is being destroyed soon
     // NB: This must happen on the same thread that calls renderFrame().
-    me->m_VsyncRenderer->cleanupRenderContext();
+    me->cleanupRenderContext();
 
     return 0;
 }
@@ -536,6 +536,20 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing,
     }
 
     return true;
+}
+
+void Pacer::cleanupRenderContext()
+{
+    // waitToRender() may have acquired a Vulkan swapchain image before it
+    // waited for a decoded frame. Submitting that untouched image during
+    // cleanup would replace the frozen picture with undefined/black pixels.
+    // Reuse the frame already retained for deferred freeing, on the render
+    // thread, without firing the new-connection frame-presented callback.
+    if (m_PreserveLastFrameOnStop.load() && m_DeferredFreeFrame != nullptr &&
+            m_VsyncRenderer->getRendererType() == IFFmpegRenderer::RendererType::Vulkan) {
+        m_VsyncRenderer->renderFrame(m_DeferredFreeFrame);
+    }
+    m_VsyncRenderer->cleanupRenderContext();
 }
 
 void Pacer::signalVsync()

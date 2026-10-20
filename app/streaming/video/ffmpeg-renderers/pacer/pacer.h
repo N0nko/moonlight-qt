@@ -50,6 +50,9 @@ public:
 
     void renderOnMainThread();
 
+    // Complete any acquired Vulkan buffer with the last image before pausing.
+    void preserveLastFrameOnStop() { m_PreserveLastFrameOnStop.store(true); }
+
 private:
     static int vsyncThread(void* context);
 
@@ -60,6 +63,8 @@ private:
     void enqueueFrameForRenderingAndUnlock(AVFrame* frame);
 
     void renderFrame(AVFrame* frame);
+
+    void cleanupRenderContext();
 
     void dropFrameForEnqueue(QQueue<AVFrame*>& queue);
 
@@ -88,6 +93,7 @@ private:
     SDL_Thread* m_VsyncThread;
     AVFrame* m_DeferredFreeFrame;
     std::atomic_bool m_Stopping;
+    std::atomic_bool m_PreserveLastFrameOnStop{false};
 
     IVsyncSource* m_VsyncSource;
     IFFmpegRenderer* m_VsyncRenderer;
