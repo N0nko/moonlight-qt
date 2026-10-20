@@ -1028,7 +1028,7 @@ Flickable {
                         model: ListModel {
                             id: pacingModeListModel
                             ListElement {
-                                text: qsTr("Standard")
+                                text: qsTr("FIFO (Punktfunk)")
                                 val: StreamingPreferences.PM_FIFO
                             }
                             ListElement {
@@ -1061,7 +1061,7 @@ Flickable {
                         ToolTip.visible: hovered
                         ToolTip.text: {
                             if (pacingModeListModel.get(currentIndex).val === StreamingPreferences.PM_FIFO)
-                                return qsTr("Normal FIFO presentation. The compatibility baseline, with no extra jitter buffer.")
+                                return qsTr("FIFO presentation with at most one frame waiting for display. May reduce delay, but can hitch with uneven delivery. Falls back to normal FIFO if presentation feedback is unavailable.")
                             if (pacingModeListModel.get(currentIndex).val === StreamingPreferences.PM_CURRENT)
                                 return qsTr("Display-timed presentation with no extra jitter buffer. Prioritizes responsiveness.")
                             return qsTr("Display-timed presentation with an adaptive one-frame reserve to absorb short delays. Adds about one frame when the reserve is full.")

@@ -400,14 +400,10 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
     VkPhysicalDevicePresentIdFeaturesKHR presentIdFeatures = {};
     VkPhysicalDeviceFeatures2 presentationFeatures = {};
     // Keep FIFO/VSync, but do not confuse GPU completion with presentation.
-    // Restrict the new budget to Low Latency; other profiles retain their policy.
-    bool pendingOverrideValid = false;
-    int pendingOverride = qEnvironmentVariableIntValue("MOONLIGHT_MAX_PENDING_PRESENTS",
-                                                       &pendingOverrideValid);
-    const int requestedPending = pendingOverrideValid && pendingOverride >= 0 && pendingOverride <= 2 ?
-        pendingOverride : 1;
-    if (m_PresentationSyncRequested && m_PacingMode == StreamingPreferences::PM_CURRENT &&
-        !m_SourceTimingEnabled && requestedPending != 0 &&
+    // Only FIFO opts into the Punktfunk-style one-undisplayed-present gate.
+    // Low Latency and Smooth retain the deployed a7a12c presentation policy.
+    const int requestedPending = m_FifoPresentationRequested ? 1 : 0;
+    if (requestedPending != 0 &&
         isExtensionSupportedByPhysicalDevice(device, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
         isExtensionSupportedByPhysicalDevice(device, VK_KHR_PRESENT_WAIT_EXTENSION_NAME)) {
         optionalDeviceExtensions.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
@@ -549,7 +545,10 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
     m_SourceDisplayHz = m_SourceTimingEnabled ? StreamUtils::getDisplayRefreshRate(m_Window) : 0;
     m_PresentationSyncRequested = params->enableVsync &&
                                   m_PacingMode != StreamingPreferences::PM_FIFO;
-    m_PresentationFeedbackRequested = m_PresentationSyncRequested || m_PacingDiagnostics;
+    m_FifoPresentationRequested = params->enableVsync &&
+                                  m_PacingMode == StreamingPreferences::PM_FIFO;
+    m_PresentationFeedbackRequested = m_PresentationSyncRequested ||
+                                      m_FifoPresentationRequested || m_PacingDiagnostics;
     m_AdaptivePresentLeadEnabled = m_PresentationSyncRequested &&
                                   m_PacingMode == StreamingPreferences::PM_CURRENT &&
                                   qEnvironmentVariableIntValue("MOONLIGHT_ADAPTIVE_PRESENT_LEAD") == 1;
@@ -1104,13 +1103,6 @@ uint64_t PlVkRenderer::getPresentLeadTimeNs() const
 
     if (m_PresentLeadOverrideUs >= 0) {
         return (uint64_t)m_PresentLeadOverrideUs * 1000ull;
-    }
-
-    // FIFO already schedules the image and the completion budget bounds its
-    // backlog. Rounding past another refresh here can add an unnecessary gap.
-    // Retain the original guard when this budget is unavailable or disabled.
-    if (m_MaxPendingPresents == 1) {
-        return 0;
     }
 
     if (m_PacingMode == StreamingPreferences::PM_SMOOTH) {

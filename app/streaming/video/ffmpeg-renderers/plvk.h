@@ -174,6 +174,7 @@ private:
     bool m_PresentationSyncRequested = false;
     bool m_PresentationFeedbackRequested = false;
     bool m_PacingDiagnostics = false;
+    bool m_FifoPresentationRequested = false;
     bool m_SourceTimingEnabled = false;
     bool m_SourceRefreshKnown = false;
     int m_SourceDisplayHz = 0;
