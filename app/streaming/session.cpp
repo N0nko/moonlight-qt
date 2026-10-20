@@ -2826,13 +2826,26 @@ void Session::exec()
             // Fall through
         case SDL_RENDER_DEVICE_RESET:
 
+            // A resize/device reset invalidates a retained renderer. During
+            // transport recovery, discard it now but defer starting a new
+            // decoder thread until common-c has established its video queues.
+            if (m_RecoveryMode.load() &&
+                    m_RecoveryPolicy.state() != RecoveryPolicy::State::AwaitingFrame) {
+                destroyVideoDecoder();
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "Deferring renderer reset until stream recovery connects");
+                break;
+            }
+
             if (event.type != SDL_WINDOWEVENT) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                             "Recreating renderer by internal request: %d",
                             event.type);
             }
 
-            if (!recreateVideoDecoder(true)) {
+            if (!recreateVideoDecoder(true,
+                                      m_RecoveryMode.load() ? Session::drFramePresented : nullptr,
+                                      m_RecoveryMode.load() ? this : nullptr)) {
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                              "Failed to recreate decoder after reset");
                 emit displayLaunchError(tr("Unable to initialize video decoder. Please check your streaming settings and try again."));
