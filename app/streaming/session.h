@@ -223,6 +223,11 @@ private:
     void suspendConnectionForLifecycle();
 
     bool resumeConnectionForLifecycle();
+
+    // MoonDeck: ack file that proves this process quiesced for the current sleep.
+    void writeLifecycleQuiescedAck();
+
+    void clearLifecycleQuiescedAck();
 #endif
 
     bool validateLaunch(SDL_Window* testWindow);

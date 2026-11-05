@@ -1873,15 +1873,44 @@ bool Session::startConnectionAsync(bool recoveryAttempt, bool fastResume)
             startOptions.fastResume = fastResume && localRoute;
         }
 
-        http.startApp(recoveryAttempt || m_Computer->currentGameId != 0 ? "resume" : "launch",
-                      m_Computer->isNvidiaServerSoftware,
-                      m_App.id, &m_StreamConfig,
-                      enableGameOptimizations,
-                      m_Preferences->playAudioOnHost,
-                      gamepadMask,
-                      !m_Preferences->multiController,
-                      rtspSessionUrl,
-                      startOptions);
+        const QString verb = recoveryAttempt || m_Computer->currentGameId != 0 ? "resume" : "launch";
+        try {
+            http.startApp(verb,
+                          m_Computer->isNvidiaServerSoftware,
+                          m_App.id, &m_StreamConfig,
+                          enableGameOptimizations,
+                          m_Preferences->playAudioOnHost,
+                          gamepadMask,
+                          !m_Preferences->multiController,
+                          rtspSessionUrl,
+                          startOptions);
+        } catch (const GfeHttpResponseException& e) {
+            // Sunshine answers 503 "No running app to resume" after the host PC or
+            // Sunshine restarted (or the app was quit) while this client slept. A
+            // cold start would send /launch, so do the same here instead of retrying
+            // /resume until the recovery window gives up.
+            if (!recoveryAttempt || verb != "resume" || e.getStatusCode() != 503 ||
+                    m_Computer->isNvidiaServerSoftware) {
+                throw;
+            }
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Recovery: host has no running app to resume (%d %s); launching app %d in the existing window",
+                        e.getStatusCode(), e.getStatusMessage(), m_App.id);
+            NvStartAppOptions launchOptions;
+            // Fits inside the recovery connection-attempt phase (8 s by default).
+            launchOptions.timeoutMs = 6000;
+            http.startApp("launch",
+                          m_Computer->isNvidiaServerSoftware,
+                          m_App.id, &m_StreamConfig,
+                          enableGameOptimizations,
+                          m_Preferences->playAudioOnHost,
+                          gamepadMask,
+                          !m_Preferences->multiController,
+                          rtspSessionUrl,
+                          launchOptions);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Recovery: host accepted launch of app %d", m_App.id);
+        }
     } catch (const GfeHttpResponseException& e) {
         if (recoveryAttempt) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -2942,6 +2971,7 @@ DispatchDeferredCleanup:
     }
     m_EventLoopRunning.store(false);
 #ifdef HAVE_LINUX_LIFECYCLE
+    clearLifecycleQuiescedAck();
     if (m_LinuxLifecycleMonitor != nullptr) {
         m_LinuxLifecycleMonitor->stopMonitoring();
         delete m_LinuxLifecycleMonitor;

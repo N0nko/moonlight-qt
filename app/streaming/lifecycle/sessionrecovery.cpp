@@ -10,6 +10,11 @@
 
 #include <openssl/rand.h>
 
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QFile>
+#include <QSaveFile>
+
 #define CONN_TEST_SERVER "qt.conntest.moonlight-stream.org"
 
 void Session::regenerateRemoteInputCredentials()
@@ -244,6 +249,40 @@ bool Session::resumeConnectionForLifecycle()
     return applyRecoveryAction(m_RecoveryPolicy.begin(SDL_GetTicks(), 0));
 }
 
+// MoonDeck keeps this process across sleep only if it can prove that the stream was
+// quiesced by this event loop (and so will reconnect on wake). The watcher names the
+// file in MOONDECK_QUIESCE_ACK_FILE; without it nothing is written.
+void Session::writeLifecycleQuiescedAck()
+{
+    const QString path = qEnvironmentVariable("MOONDECK_QUIESCE_ACK_FILE");
+    if (path.isEmpty()) {
+        return;
+    }
+
+    QSaveFile file(path);
+    const QByteArray body = QByteArray::number(QCoreApplication::applicationPid()) + ' ' +
+            (qEnvironmentVariableIsEmpty("MOONDECK_SESSION_ID") ?
+                 QByteArray("unknown") : qgetenv("MOONDECK_SESSION_ID")) + ' ' +
+            QByteArray::number(QDateTime::currentMSecsSinceEpoch()) + '\n';
+    if (file.open(QIODevice::WriteOnly) && file.write(body) == body.size() && file.commit()) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Lifecycle quiesce acknowledged for MoonDeck");
+    }
+    else {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Unable to write lifecycle quiesce ack %s",
+                    qPrintable(path));
+    }
+}
+
+void Session::clearLifecycleQuiescedAck()
+{
+    const QString path = qEnvironmentVariable("MOONDECK_QUIESCE_ACK_FILE");
+    if (!path.isEmpty()) {
+        QFile::remove(path);
+    }
+}
+
 bool Session::processLifecycleState()
 {
     if (m_LifecycleSleepQueued.exchange(false)) {
@@ -254,6 +293,9 @@ bool Session::processLifecycleState()
             suspendConnectionForLifecycle();
         }
 
+        // Written before the inhibitor is released, so it exists by the time the
+        // MoonDeck watcher receives its sleep event from sleep.target.
+        writeLifecycleQuiescedAck();
         if (m_LinuxLifecycleMonitor != nullptr) {
             m_LinuxLifecycleMonitor->acknowledgeSleepReady();
         }
@@ -287,6 +329,7 @@ bool Session::processLifecycleState()
                  m_LifecycleSuspended.exchange(false)) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "System wake received in the existing stream window");
+            clearLifecycleQuiescedAck();
             if (!resumeConnectionForLifecycle()) {
                 return false;
             }
