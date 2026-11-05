@@ -1890,6 +1890,7 @@ bool Session::startConnectionAsync(bool recoveryAttempt, bool fastResume)
             // cold start would send /launch, so do the same here instead of retrying
             // /resume until the recovery window gives up.
             if (!recoveryAttempt || verb != "resume" || e.getStatusCode() != 503 ||
+                    qstrcmp(e.getStatusMessage(), "No running app to resume") != 0 ||
                     m_Computer->isNvidiaServerSoftware) {
                 throw;
             }
