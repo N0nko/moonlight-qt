@@ -126,3 +126,158 @@ private:
     uint64_t m_LeadNs = 0;
     uint64_t m_LastFeedbackNs = 0;
 };
+
+// FIFO profile backlog trim, evaluated once the present gate opens and before
+// the head frame is submitted. It replaces the 500 ms queue-history trim, which
+// dropped a frame that still owned a refresh slot about every 5 s at 90 Hz.
+//
+// Rules, in order:
+//  1. Slotless head: its RTP pts is less than half a refresh after the frame on
+//     glass (a host capture extra). With a follower queued, drop the head; the
+//     follower takes this slot with an exact one-slot content step. Alone, wait
+//     for the follower until the caller's submit deadline, then keep the head.
+//  2. Recovery: after a starved slot (the display already repeated), drop one
+//     stale frame per dequeue until caught up (depth 1), for a few dequeues at
+//     most. The skips land in the stall's own hitch.
+//  3. Drift backstop: drop one frame only after every dequeue for a long hold
+//     had a backlog (depth >= 2), or depth >= 3 for a shorter hold. Host gaps
+//     already drain a backlog for free, so this rarely fires.
+// Never more than one drop per dequeue, and never the last queued frame.
+enum class FifoTrimAction : uint8_t {
+    Present,          // submit the head
+    DropSlotless,     // drop the head; the follower owns the slot
+    WaitForFollower,  // hold the slotless head until untilUs for a follower
+    DropRecovery,     // drop the head after a starved slot
+    DropBacklog,      // drift backstop
+};
+
+struct FifoTrimInput {
+    int depth = 0;              // queued decoded frames, head included
+    bool headPtsValid = false;
+    uint32_t headPts = 0;       // RTP 90 kHz
+    uint64_t nowUs = 0;
+    uint64_t waitDeadlineUs = 0;// latest time to hold a slotless head; 0 = never wait
+};
+
+struct FifoTrimDecision {
+    FifoTrimAction action = FifoTrimAction::Present;
+    uint64_t untilUs = 0;
+};
+
+class FifoBacklogTrim {
+public:
+    static constexpr uint64_t kBacklogHoldUs = 10000000;  // depth >= 2 at every dequeue
+    static constexpr uint64_t kBurstHoldUs = 1000000;     // depth >= 3 at every dequeue
+    static constexpr int kRecoveryDequeues = 4;
+
+    // The head became available more than 1.5 refreshes after the gate opened:
+    // at least one slot repeated beyond what a single host gap explains.
+    static bool starvedSlot(uint64_t gateUs, uint64_t availableUs, uint64_t periodUs)
+    {
+        return gateUs != 0 && availableUs > gateUs + periodUs + periodUs / 2;
+    }
+
+    // slotTicks: one display refresh in RTP 90 kHz ticks.
+    void configure(uint32_t slotTicks)
+    {
+        *this = {};
+        m_SlotTicks = slotTicks;
+    }
+
+    void reset()
+    {
+        const uint32_t slot = m_SlotTicks;
+        configure(slot);
+    }
+
+    // The head shares the slot of the frame on glass: a forward pts step under half a refresh.
+    bool slotless(const FifoTrimInput& in) const
+    {
+        if (m_SlotTicks == 0 || !in.headPtsValid || !m_LastPtsValid) {
+            return false;
+        }
+        const int32_t step = static_cast<int32_t>(in.headPts - m_LastPts);
+        return step >= 0 && static_cast<uint32_t>(step) * 2 < m_SlotTicks;
+    }
+
+    FifoTrimDecision decide(const FifoTrimInput& in) const
+    {
+        FifoTrimDecision d;
+        if (in.depth <= 0) {
+            return d;
+        }
+        if (slotless(in)) {
+            if (in.depth >= 2) {
+                d.action = FifoTrimAction::DropSlotless;
+            }
+            else if (in.waitDeadlineUs > in.nowUs) {
+                d.action = FifoTrimAction::WaitForFollower;
+                d.untilUs = in.waitDeadlineUs;
+            }
+            return d;
+        }
+        if (in.depth < 2) {
+            return d;
+        }
+        if (m_RecoveryLeft > 0) {
+            d.action = FifoTrimAction::DropRecovery;
+        }
+        else if ((in.depth >= 3 && m_Depth3 && in.nowUs - m_Depth3SinceUs >= kBurstHoldUs) ||
+                 (m_Depth2 && in.nowUs - m_Depth2SinceUs >= kBacklogHoldUs)) {
+            d.action = FifoTrimAction::DropBacklog;
+        }
+        return d;
+    }
+
+    // A drop was applied; a backstop drop restarts the hold.
+    void dropped(FifoTrimAction action, uint64_t nowUs)
+    {
+        if (action == FifoTrimAction::DropBacklog) {
+            m_Depth2SinceUs = nowUs;
+            m_Depth3SinceUs = nowUs;
+        }
+    }
+
+    // The head is being submitted. depth counts it; starved means the head
+    // reached the gate after its slot had already been repeated.
+    void presented(int depth, bool ptsValid, uint32_t pts, uint64_t nowUs, bool starved)
+    {
+        if (ptsValid && m_LastPtsValid) {
+            const int32_t step = static_cast<int32_t>(pts - m_LastPts);
+            // A stream restart or wrap far outside one second: forget history.
+            if (step < 0 || step > 90000) {
+                const uint32_t slot = m_SlotTicks;
+                configure(slot);
+            }
+        }
+        m_LastPtsValid = ptsValid;
+        m_LastPts = pts;
+        if (!m_Depth2 || depth < 2) {
+            m_Depth2SinceUs = nowUs;
+        }
+        if (!m_Depth3 || depth < 3) {
+            m_Depth3SinceUs = nowUs;
+        }
+        m_Depth2 = depth >= 2;
+        m_Depth3 = depth >= 3;
+        if (starved) {
+            m_RecoveryLeft = kRecoveryDequeues;
+        }
+        else if (depth <= 1) {
+            m_RecoveryLeft = 0;  // caught up
+        }
+        else if (m_RecoveryLeft > 0) {
+            --m_RecoveryLeft;
+        }
+    }
+
+private:
+    uint32_t m_SlotTicks = 0;
+    bool m_LastPtsValid = false;
+    uint32_t m_LastPts = 0;
+    bool m_Depth2 = false;          // every dequeue since m_Depth2SinceUs had depth >= 2
+    bool m_Depth3 = false;
+    uint64_t m_Depth2SinceUs = 0;
+    uint64_t m_Depth3SinceUs = 0;
+    int m_RecoveryLeft = 0;
+};

@@ -220,7 +220,10 @@ public:
         int queueDepth = 0;
         uint32_t drainDrops = 0;
         uint32_t otherDrops = 0;
-        uint8_t action = 0; // 0 render head, 1 drained, 2 waited for deadline
+        // 0 render head, 1 drained, 2 waited for deadline; FIFO trim:
+        // 3 slotless drop, 4 slotless kept after waiting, 5 recovery drop,
+        // 6 backlog drop, 7 slotless drop after waiting for the follower
+        uint8_t action = 0;
     };
     virtual void setFramePacingInfo(const FramePacingInfo&) {}
 

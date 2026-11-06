@@ -15,6 +15,8 @@
 #include <SDL_syswm.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <iterator>
 #include <vector>
 #include <QDeadlineTimer>
 
@@ -167,6 +169,8 @@ int Pacer::renderThread(void* context)
     while (!me->m_Stopping) {
         // Wait for the renderer to be ready for the next frame
         me->m_VsyncRenderer->waitToRender();
+        // With the one-present FIFO gate this returns at the previous latch.
+        const uint64_t gateUs = me->m_FifoTrimEnabled ? LiGetMicroseconds() : 0;
 
         // Acquire the frame queue lock to protect the queue and
         // the not empty condition
@@ -246,6 +250,14 @@ int Pacer::renderThread(void* context)
                 }
                 break;
             }
+            if (me->m_Stopping) {
+                me->m_FrameQueueLock.unlock();
+                break;
+            }
+        }
+
+        if (me->m_FifoTrimEnabled) {
+            me->applyFifoTrimLocked(gateUs, pacingInfo);
             if (me->m_Stopping) {
                 me->m_FrameQueueLock.unlock();
                 break;
@@ -365,6 +377,81 @@ AVFrame* Pacer::takeSourceFrameLocked()
         return frame;
     }
     return nullptr;
+}
+
+void Pacer::applyFifoTrimLocked(uint64_t gateUs, IFFmpegRenderer::FramePacingInfo& info)
+{
+    uint64_t nowUs = LiGetMicroseconds();
+    const bool starved = FifoBacklogTrim::starvedSlot(gateUs, nowUs, m_FifoTrimPeriodUs);
+    const uint64_t deadlineUs = gateUs != 0 && m_FifoTrimWaitBudgetUs != 0 ?
+                                    gateUs + m_FifoTrimWaitBudgetUs : 0;
+    bool waited = false;
+    while (!m_Stopping && !m_RenderQueue.isEmpty()) {
+        const AVFrame* head = m_RenderQueue.head();
+        FifoTrimInput in;
+        in.depth = static_cast<int>(m_RenderQueue.count());
+        in.headPtsValid = head->pts != AV_NOPTS_VALUE;
+        in.headPts = static_cast<uint32_t>(head->pts);
+        in.nowUs = nowUs;
+        in.waitDeadlineUs = deadlineUs;
+        const FifoTrimDecision d = m_FifoTrim.decide(in);
+        if (d.action == FifoTrimAction::WaitForFollower) {
+            waited = true;
+            QDeadlineTimer deadline(Qt::PreciseTimer);
+            deadline.setPreciseRemainingTime(0, static_cast<qint64>(d.untilUs - nowUs) * 1000,
+                                             Qt::PreciseTimer);
+            m_RenderQueueNotEmpty.wait(&m_FrameQueueLock, deadline);
+            nowUs = LiGetMicroseconds();
+            continue;
+        }
+        if (d.action != FifoTrimAction::Present && m_RenderQueue.count() >= 2) {
+            AVFrame* stale = m_RenderQueue.dequeue();
+            ++m_VideoStats->pacerDroppedFrames;
+            ++m_DiagnosticDroppedFrames;
+            ++info.drainDrops;
+            av_frame_free(&stale);
+            m_FifoTrim.dropped(d.action, nowUs);
+            switch (d.action) {
+            case FifoTrimAction::DropSlotless:
+                info.action = waited ? 7 : 3;
+                break;
+            case FifoTrimAction::DropRecovery:
+                info.action = 5;
+                break;
+            default:
+                info.action = 6;
+                break;
+            }
+        }
+        else if (waited) {
+            info.action = 4;
+        }
+        break;
+    }
+    if (m_RenderQueue.isEmpty()) {
+        return;
+    }
+    if (info.action >= 3 && info.action < 8) {
+        ++m_FifoTrimCounts[info.action];
+        if (info.action == 6) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "FIFO trim: backlog drop at depth %d",
+                        static_cast<int>(m_RenderQueue.count()) + 1);
+        }
+    }
+    const AVFrame* head = m_RenderQueue.head();
+    m_FifoTrim.presented(static_cast<int>(m_RenderQueue.count()), head->pts != AV_NOPTS_VALUE,
+                         static_cast<uint32_t>(head->pts), nowUs, starved);
+    if (nowUs - m_FifoTrimLogUs >= 60000000ull) {
+        if (m_FifoTrimLogUs != 0) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "FIFO trim (60 s): slotless %u (after wait %u, kept %u), recovery %u, backlog %u",
+                        m_FifoTrimCounts[3] + m_FifoTrimCounts[7], m_FifoTrimCounts[7],
+                        m_FifoTrimCounts[4], m_FifoTrimCounts[5], m_FifoTrimCounts[6]);
+        }
+        std::fill(std::begin(m_FifoTrimCounts), std::end(m_FifoTrimCounts), 0u);
+        m_FifoTrimLogUs = nowUs;
+    }
 }
 
 void Pacer::enqueueFrameForRenderingAndUnlock(AVFrame *frame)
@@ -513,6 +600,28 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing,
     if (m_FifoDeadlineEnabled) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "FIFO deadline wake: pacer hooked");
     }
+    // Slot-aware trim needs the one-present gate (m_FifoDeadlineEnabled) and a
+    // stream that owns every refresh; other rates keep the history trim.
+    m_FifoTrimEnabled = m_FifoDeadlineEnabled && m_DisplayFps > 0 &&
+                        std::abs(m_MaxVideoFps - m_DisplayFps) <= 1 &&
+                        qgetenv("MOONLIGHT_FIFO_TRIM") != "0";
+    if (m_FifoTrimEnabled) {
+        m_FifoTrimPeriodUs = 1000000ull / static_cast<uint64_t>(m_DisplayFps);
+        m_FifoTrim.configure(static_cast<uint32_t>(90000 / m_DisplayFps));
+        // Submit must still make the next latch: leave room for p99.9 render time.
+        bool budgetValid = false;
+        const int budgetUs = qEnvironmentVariableIntValue("MOONLIGHT_FIFO_TRIM_WAIT_US", &budgetValid);
+        if (budgetValid && budgetUs >= 0 && static_cast<uint64_t>(budgetUs) <= m_FifoTrimPeriodUs / 2) {
+            m_FifoTrimWaitBudgetUs = static_cast<uint64_t>(budgetUs);
+        }
+        else {
+            m_FifoTrimWaitBudgetUs = m_FifoTrimPeriodUs > 6600 ?
+                std::min<uint64_t>(m_FifoTrimPeriodUs - 6600, m_FifoTrimPeriodUs / 2) : 0;
+        }
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "FIFO trim: %s (follower wait %.1f ms)",
+                m_FifoTrimEnabled ? "slot-aware" : "queue history",
+                m_FifoTrimWaitBudgetUs / 1000.0);
 #endif
     if (enablePacing && !rendererPacing) {
         SDL_SysWMinfo info;
@@ -645,6 +754,10 @@ void Pacer::renderFrame(AVFrame* frame)
 
     if (m_FrameReserveEnabled) {
         frameDropTarget = renderReserveFrames();
+    }
+    else if (m_FifoTrimEnabled) {
+        // Trimmed at the present gate by applyFifoTrimLocked().
+        frameDropTarget = MAX_QUEUED_FRAMES;
     }
     else if (m_RendererAttributes & RENDERER_ATTRIBUTE_NO_BUFFERING) {
         // Renderers that don't buffer any frames but don't support waitToRender() need us to buffer

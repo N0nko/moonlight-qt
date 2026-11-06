@@ -3,6 +3,7 @@
 #include "../../decoder.h"
 #include "../renderer.h"
 #include "sourcetimeline.h"
+#include "lowlatencypolicy.h"
 
 #include <QQueue>
 #include <QMutex>
@@ -80,6 +81,7 @@ private:
 
     void logPacingDiagnostics();
     AVFrame* takeSourceFrameLocked();
+    void applyFifoTrimLocked(uint64_t gateUs, IFFmpegRenderer::FramePacingInfo& info);
 
     QQueue<AVFrame*> m_RenderQueue;
     QQueue<AVFrame*> m_PacingQueue;
@@ -105,6 +107,14 @@ private:
     bool m_LatestFrameEnabled = false;
     bool m_FifoDeadlineEnabled = false;
     uint32_t m_OtherDropsSinceRender = 0;
+    // FIFO profile at stream fps == refresh: slot-aware trim at the present gate
+    // replaces the queue-history trim in renderFrame().
+    bool m_FifoTrimEnabled = false;
+    FifoBacklogTrim m_FifoTrim;
+    uint64_t m_FifoTrimPeriodUs = 0;
+    uint64_t m_FifoTrimWaitBudgetUs = 0;
+    uint64_t m_FifoTrimLogUs = 0;
+    uint32_t m_FifoTrimCounts[8] = {};
     std::atomic_bool m_SourceTimingEnabled{false};
     bool m_SourceTimingActive = false;
     SourceTimeline m_SourceTimeline;
