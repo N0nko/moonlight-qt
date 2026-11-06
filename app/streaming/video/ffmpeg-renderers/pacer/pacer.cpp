@@ -214,6 +214,44 @@ int Pacer::renderThread(void* context)
             me->m_DiagnosticQueueWaitUs.push_back(LiGetMicroseconds() - queueWaitStartedUs);
         }
 
+        // FIFO deadline wake: optionally hold the backlog frame until the
+        // deadline of the next vblank and spend one drop to reach depth 0.
+        IFFmpegRenderer::FramePacingInfo pacingInfo;
+        if (me->m_FifoDeadlineEnabled) {
+            while (!me->m_Stopping && !me->m_RenderQueue.isEmpty()) {
+                uint64_t readyUs[MAX_QUEUED_FRAMES] = {};
+                const int count = std::min(static_cast<int>(me->m_RenderQueue.count()), MAX_QUEUED_FRAMES);
+                for (int i = 0; i < count; ++i) {
+                    readyUs[i] = static_cast<uint64_t>(me->m_RenderQueue[i]->pkt_dts);
+                }
+                const IFFmpegRenderer::FifoPlan plan = me->m_VsyncRenderer->planFifoFrame(readyUs, count);
+                if (plan.action == IFFmpegRenderer::FifoAction::WaitUntil) {
+                    const uint64_t nowUs = LiGetMicroseconds();
+                    if (nowUs >= plan.untilUs) {
+                        continue; // The planner sees the deadline has passed.
+                    }
+                    pacingInfo.action = 2;
+                    QDeadlineTimer deadline(Qt::PreciseTimer);
+                    deadline.setPreciseRemainingTime(0, (plan.untilUs - nowUs) * 1000, Qt::PreciseTimer);
+                    me->m_RenderQueueNotEmpty.wait(&me->m_FrameQueueLock, deadline);
+                    continue;
+                }
+                if (plan.action == IFFmpegRenderer::FifoAction::DropHead && count >= 2) {
+                    AVFrame* stale = me->m_RenderQueue.dequeue();
+                    ++me->m_VideoStats->pacerDroppedFrames;
+                    ++me->m_DiagnosticDroppedFrames;
+                    ++pacingInfo.drainDrops;
+                    pacingInfo.action = 1;
+                    av_frame_free(&stale);
+                }
+                break;
+            }
+            if (me->m_Stopping) {
+                me->m_FrameQueueLock.unlock();
+                break;
+            }
+        }
+
         // With a reserve, keep only the newest due frame plus that reserve.
         while (me->m_FrameReserveEnabled &&
                me->m_RenderQueue.count() > reserveFrames + 1) {
@@ -233,10 +271,18 @@ int Pacer::renderThread(void* context)
         }
 
         me->recordReserveUseLocked(me->m_RenderQueue.count(), reserveFrames);
+        if (me->m_FifoDeadlineEnabled) {
+            pacingInfo.queueDepth = static_cast<int>(me->m_RenderQueue.count());
+            pacingInfo.otherDrops = me->m_OtherDropsSinceRender;
+            me->m_OtherDropsSinceRender = 0;
+        }
         AVFrame* frame = me->m_RenderQueue.dequeue();
         me->recordQueueDepthLocked();
         me->m_FrameQueueLock.unlock();
 
+        if (me->m_FifoDeadlineEnabled) {
+            me->m_VsyncRenderer->setFramePacingInfo(pacingInfo);
+        }
         me->renderFrame(frame);
     }
 
@@ -458,6 +504,16 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing,
 #endif
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Newest decoded frame selection: %s",
                 m_LatestFrameEnabled ? "enabled" : "disabled");
+#ifdef Q_OS_LINUX
+    // FIFO profile only: Low latency and Smooth never take this path.
+    m_FifoDeadlineEnabled = pacingMode == StreamingPreferences::PM_FIFO && !enablePacing &&
+                            !m_FrameReserveEnabled && !m_SourceTimingEnabled &&
+                            m_VsyncRenderer->isRenderThreadSupported() &&
+                            m_VsyncRenderer->isFifoDeadlineEnabled();
+    if (m_FifoDeadlineEnabled) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "FIFO deadline wake: pacer hooked");
+    }
+#endif
     if (enablePacing && !rendererPacing) {
         SDL_SysWMinfo info;
         SDL_VERSION(&info.version);
@@ -618,6 +674,7 @@ void Pacer::renderFrame(AVFrame* frame)
     while (!m_SourceTimingEnabled && m_RenderQueue.count() > frameDropTarget) {
         AVFrame* frame = m_RenderQueue.dequeue();
         m_DiagnosticDroppedFrames++;
+        m_OtherDropsSinceRender++;
 
         // Drop the lock while we call av_frame_free()
         m_FrameQueueLock.unlock();
@@ -640,6 +697,7 @@ void Pacer::dropFrameForEnqueue(QQueue<AVFrame*>& queue)
         AVFrame* frame = queue.dequeue();
         m_VideoStats->pacerDroppedFrames++;
         m_DiagnosticDroppedFrames++;
+        m_OtherDropsSinceRender++;
         av_frame_free(&frame);
     }
 }

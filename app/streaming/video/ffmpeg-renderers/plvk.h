@@ -2,6 +2,7 @@
 
 #include "renderer.h"
 #include "pacer/lowlatencypolicy.h"
+#include "pacer/fifodepthpolicy.h"
 
 #ifdef Q_OS_WIN32
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -39,7 +40,10 @@ private:
 
 #endif
 
+class FifoTraceWriter;
+
 class PlVkRenderer : public IFFmpegRenderer {
+    friend class FifoTraceWriter;
 public:
     PlVkRenderer(AVHWDeviceType hwDeviceType = AV_HWDEVICE_TYPE_NONE, IFFmpegRenderer *backendRenderer = nullptr);
     virtual ~PlVkRenderer() override;
@@ -49,6 +53,9 @@ public:
     virtual bool testRenderFrame(AVFrame* frame) override;
     virtual void waitToRender() override;
     virtual bool getSourcePresentationSlot(PresentationSlot& slot) override;
+    virtual bool isFifoDeadlineEnabled() override;
+    virtual FifoPlan planFifoFrame(const uint64_t* readyUs, int count) override;
+    virtual void setFramePacingInfo(const FramePacingInfo& info) override;
     virtual void cleanupRenderContext() override;
     virtual void notifyOverlayUpdated(Overlay::OverlayType) override;
     virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO) override;
@@ -91,6 +98,44 @@ private:
     uint64_t getPresentLeadTimeNs() const;
     void waitForPresentationBudget();
     const char* getPacingModeName() const;
+    void injectPresentId(VkPresentInfoKHR* presentInfo);
+    void observeFifoFeedback(const VkPastPresentationTimingGOOGLE& timing);
+    void logFifoDeadline();
+    static void renderInfoCallback(void* priv, const pl_render_info* info);
+
+    // Per-present FIFO record, completed by display-timing feedback.
+    struct FifoRecord {
+        uint32_t id = 0;
+        uint32_t pts = 0;
+        bool hasPts = false;
+        bool gateFromFeedback = false;
+        bool armed = false;
+        bool cadenceOk = false;
+        uint8_t action = 0;
+        int8_t depth = 1;
+        int16_t queueDepth = 0;
+        uint16_t drainDrops = 0;
+        uint16_t otherDrops = 0;
+        uint64_t receiveNs = 0;
+        uint64_t readyNs = 0;
+        uint64_t renderStartNs = 0;
+        uint64_t submitNs = 0;
+        uint64_t gateNs = 0;
+        uint64_t gateVblankNs = 0;
+        uint64_t toVblankNs = 0;
+        int64_t frameSlackNs = 0;
+        int64_t slackLoNs = 0;
+        uint64_t leadNs = 0;
+        uint64_t renderNs = 0;
+        uint64_t gpuNs = 0;
+        uint64_t actualNs = 0;
+        uint64_t earliestNs = 0;
+        uint64_t desiredNs = 0;
+        uint64_t marginNs = 0;
+        int32_t displayRefreshes = 0;
+        int32_t sourceRefreshes = 0;
+    };
+    void emitFifoRecord(const FifoRecord& record);
 #endif
 
     // The backend renderer if we're frontend-only
@@ -218,5 +263,43 @@ private:
     std::vector<uint64_t> m_PresentationIntervalsNs;
     std::vector<uint64_t> m_PresentationErrorsNs;
     std::vector<uint64_t> m_SubmissionMarginsNs;
+
+    // FIFO deadline wake. Observation runs whenever the FIFO gate and display
+    // timing are available (so a disabled run still logs what it would do);
+    // m_FifoDeadlineActive additionally lets planFifoFrame() act.
+    bool m_FifoObserve = false;
+    bool m_FifoDeadlineActive = false;
+    bool m_FifoPeriodLogged = false;
+    int m_FifoDisplayHz = 0;
+    uint64_t m_FifoPeriodNs = 0;
+    FifoDepthPolicy m_FifoPolicy;
+    pl_render_params m_RenderParams = {};
+    uint64_t m_FrameGpuNs = 0;
+    uint64_t m_RenderStartNs = 0;
+    uint64_t m_PendingReceiveNs = 0;
+    uint32_t m_PendingPts = 0;
+    bool m_PendingHasPts = false;
+    uint32_t m_LastRenderedPts = 0;
+    bool m_HasLastRenderedPts = false;
+    FramePacingInfo m_NextPacingInfo;
+    uint64_t m_GateNs = 0;
+    uint64_t m_GateVblankNs = 0;
+    bool m_GateFromFeedback = false;
+    uint32_t m_LastSubmittedTimingId = 0;
+    std::array<FifoRecord, 256> m_FifoRecords = {};
+    uint64_t m_PrevFeedbackActualNs = 0;
+    uint32_t m_PrevFeedbackPts = 0;
+    bool m_PrevFeedbackValid = false;
+    bool m_LastLoggedCadence = false;
+    uint32_t m_FifoDrains = 0;
+    uint32_t m_FifoAborts = 0;
+    uint32_t m_FifoWaits = 0;
+    uint32_t m_FifoBacklogFrames = 0;
+    uint32_t m_FifoRepeats = 0;
+    uint32_t m_FifoSkips = 0;
+    uint32_t m_FifoHostGaps = 0;
+    uint32_t m_FifoRefreshes = 0;
+    uint64_t m_FifoWindowStartNs = 0;
+    FifoTraceWriter* m_FifoTrace = nullptr;
 #endif
 };

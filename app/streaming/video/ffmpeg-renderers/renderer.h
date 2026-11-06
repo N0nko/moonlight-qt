@@ -203,6 +203,27 @@ public:
     // Times are in LiGetMicroseconds()'s clock domain. Render-thread only.
     virtual bool getSourcePresentationSlot(PresentationSlot&) { return false; }
 
+    // FIFO deadline wake (Linux FIFO pacing profile). Render thread only, and
+    // called with the pacer's queue lock held, so it must not block.
+    // readyUs are decode-ready times (LiGetMicroseconds) of queued frames,
+    // oldest first.
+    enum class FifoAction { RenderHead, DropHead, WaitUntil };
+    struct FifoPlan {
+        FifoAction action = FifoAction::RenderHead;
+        uint64_t untilUs = 0;
+    };
+    virtual bool isFifoDeadlineEnabled() { return false; }
+    virtual FifoPlan planFifoFrame(const uint64_t*, int) { return FifoPlan(); }
+
+    // Diagnostics for the next renderFrame() call (per-frame trace only).
+    struct FramePacingInfo {
+        int queueDepth = 0;
+        uint32_t drainDrops = 0;
+        uint32_t otherDrops = 0;
+        uint8_t action = 0; // 0 render head, 1 drained, 2 waited for deadline
+    };
+    virtual void setFramePacingInfo(const FramePacingInfo&) {}
+
     // Called on the same thread as renderFrame() during destruction of the renderer
     virtual void cleanupRenderContext() {
         // Nothing

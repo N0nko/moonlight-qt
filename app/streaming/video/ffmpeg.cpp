@@ -2191,6 +2191,8 @@ void FFmpegVideoDecoder::decoderThreadProc()
                             recordPacingFrameDecoded(du, decodeReadyUs);
                         }
                         frame->pts = static_cast<int64_t>(du.rtpTimestamp);
+                        // Reassembly-complete time for the FIFO diagnostic trace.
+                        frame->best_effort_timestamp = static_cast<int64_t>(du.enqueueTimeUs);
                         stale = m_DropStaleDecodedFrames &&
                                 staleDecodedFrame(du.enqueueTimeUs, decodeReadyUs, m_StreamFps);
                     }

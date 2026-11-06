@@ -103,6 +103,8 @@ private:
     bool m_FrameReservePrimed;
     bool m_PacingDiagnostics;
     bool m_LatestFrameEnabled = false;
+    bool m_FifoDeadlineEnabled = false;
+    uint32_t m_OtherDropsSinceRender = 0;
     std::atomic_bool m_SourceTimingEnabled{false};
     bool m_SourceTimingActive = false;
     SourceTimeline m_SourceTimeline;

@@ -22,6 +22,113 @@ extern "C" {
 
 #ifdef Q_OS_LINUX
 #include <time.h>
+#include <unistd.h>
+
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <mutex>
+#include <thread>
+
+// Per-frame FIFO diagnostic trace (MOONLIGHT_FIFO_TRACE=<path>, off by default).
+// The render thread only appends rows to a vector; a low-priority writer
+// thread formats and writes them, so file I/O never blocks presentation.
+class FifoTraceWriter {
+public:
+    using Row = PlVkRenderer::FifoRecord;
+
+    static FifoTraceWriter* open(const QByteArray& path)
+    {
+        FILE* file = fopen(path.constData(), "ae");
+        if (file == nullptr) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "FIFO trace: cannot open %s", path.constData());
+            return nullptr;
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "FIFO trace: writing %s", path.constData());
+        return new FifoTraceWriter(file);
+    }
+
+    ~FifoTraceWriter()
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_Lock);
+            m_Stop = true;
+        }
+        m_Wake.notify_one();
+        m_Thread.join();
+        fclose(m_File);
+    }
+
+    void push(const Row& row)
+    {
+        std::lock_guard<std::mutex> lock(m_Lock);
+        if (m_Pending.size() >= 1u << 16) {
+            ++m_Lost;
+            return;
+        }
+        m_Pending.push_back(row);
+    }
+
+private:
+    explicit FifoTraceWriter(FILE* file) : m_File(file)
+    {
+        m_Pending.reserve(4096);
+        fseek(m_File, 0, SEEK_END);
+        if (ftell(m_File) > 0) {
+            fputs("# renderer restart
+", m_File);
+        }
+        fputs("present_id,pts,receive_ns,ready_ns,render_start_ns,submit_ns,gate_ns,gate_vblank_ns,"
+              "gate_from_feedback,actual_ns,earliest_ns,desired_ns,margin_ns,to_vblank_ns,c_ns,"
+              "frame_slack_ns,slack_lo_ns,lead_ns,render_ns,gpu_ns,queue_depth,drain_drops,other_drops,"
+              "action,depth,armed,cadence_ok,display_refreshes,source_refreshes,lost\n", m_File);
+        m_Thread = std::thread([this] { run(); });
+    }
+
+    void run()
+    {
+        std::vector<Row> rows;
+        rows.reserve(4096);
+        std::unique_lock<std::mutex> lock(m_Lock);
+        while (!m_Stop || !m_Pending.empty()) {
+            m_Wake.wait_for(lock, std::chrono::milliseconds(500));
+            rows.swap(m_Pending);
+            const uint32_t lost = m_Lost;
+            lock.unlock();
+            for (const Row& r : rows) {
+                const int64_t c = r.marginNs != 0 ?
+                    static_cast<int64_t>(r.toVblankNs) - static_cast<int64_t>(r.marginNs) : 0;
+                fprintf(m_File,
+                        "%u,%s%u,%llu,%llu,%llu,%llu,%llu,%llu,%d,%llu,%llu,%llu,%llu,%llu,%lld,"
+                        "%lld,%lld,%llu,%llu,%llu,%d,%u,%u,%u,%d,%d,%d,%d,%d,%u\n",
+                        r.id, r.hasPts ? "" : "-", r.pts,
+                        (unsigned long long)r.receiveNs, (unsigned long long)r.readyNs,
+                        (unsigned long long)r.renderStartNs, (unsigned long long)r.submitNs,
+                        (unsigned long long)r.gateNs, (unsigned long long)r.gateVblankNs,
+                        r.gateFromFeedback ? 1 : 0,
+                        (unsigned long long)r.actualNs, (unsigned long long)r.earliestNs,
+                        (unsigned long long)r.desiredNs, (unsigned long long)r.marginNs,
+                        (unsigned long long)r.toVblankNs, (long long)c,
+                        (long long)r.frameSlackNs, (long long)r.slackLoNs,
+                        (unsigned long long)r.leadNs, (unsigned long long)r.renderNs,
+                        (unsigned long long)r.gpuNs, r.queueDepth, r.drainDrops, r.otherDrops,
+                        r.action, r.depth, r.armed ? 1 : 0, r.cadenceOk ? 1 : 0,
+                        r.displayRefreshes, r.sourceRefreshes, lost);
+            }
+            rows.clear();
+            fflush(m_File);
+            lock.lock();
+        }
+    }
+
+    FILE* m_File;
+    std::mutex m_Lock;
+    std::condition_variable m_Wake;
+    std::vector<Row> m_Pending;
+    uint32_t m_Lost = 0;
+    bool m_Stop = false;
+    std::thread m_Thread;
+};
 #endif
 
 #ifndef VK_KHR_video_decode_av1
@@ -167,6 +274,11 @@ PlVkRenderer::~PlVkRenderer()
 {
     // The render context must have been cleaned up by now
     SDL_assert(!m_HasPendingSwapchainFrame);
+
+#ifdef Q_OS_LINUX
+    delete m_FifoTrace;
+    m_FifoTrace = nullptr;
+#endif
 
     if (m_Vulkan != nullptr) {
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
@@ -457,41 +569,66 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
             }
         }
 
-        if (displayTimingEnabled) {
-            fn_vkGetDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
-                m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, "vkGetDeviceProcAddr"));
-            if (fn_vkGetDeviceProcAddr != nullptr) {
-                fn_vkGetPastPresentationTimingGOOGLE =
-                    reinterpret_cast<PFN_vkGetPastPresentationTimingGOOGLE>(
-                        fn_vkGetDeviceProcAddr(m_Vulkan->device,
-                                               "vkGetPastPresentationTimingGOOGLE"));
-            }
+        fn_vkGetDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+            m_PlVkInstance->get_proc_addr(m_PlVkInstance->instance, "vkGetDeviceProcAddr"));
+        if (displayTimingEnabled && fn_vkGetDeviceProcAddr != nullptr) {
+            fn_vkGetPastPresentationTimingGOOGLE =
+                reinterpret_cast<PFN_vkGetPastPresentationTimingGOOGLE>(
+                    fn_vkGetDeviceProcAddr(m_Vulkan->device,
+                                           "vkGetPastPresentationTimingGOOGLE"));
+        }
+        m_DisplayTimingAvailable = fn_vkGetPastPresentationTimingGOOGLE != nullptr;
 
-            m_DisplayTimingAvailable = fn_vkGetPastPresentationTimingGOOGLE != nullptr;
+        // The FIFO gate needs only present_id + present_wait. Do not tie it to
+        // VK_GOOGLE_display_timing, or FIFO silently becomes plain FIFO elsewhere.
+        bool presentIdEnabled = false;
+        bool presentWaitEnabled = false;
+        for (auto feature = reinterpret_cast<const VkBaseInStructure*>(m_Vulkan->features);
+             feature != nullptr; feature = feature->pNext) {
+            if (feature->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR) {
+                presentIdEnabled = reinterpret_cast<const VkPhysicalDevicePresentIdFeaturesKHR*>(feature)->presentId;
+            }
+            if (feature->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR) {
+                presentWaitEnabled = reinterpret_cast<const VkPhysicalDevicePresentWaitFeaturesKHR*>(feature)->presentWait;
+            }
+        }
+        if (requestedPending != 0 && fn_vkGetDeviceProcAddr != nullptr &&
+            vkParams.features != nullptr && presentIdEnabled && presentWaitEnabled) {
+            fn_vkWaitForPresentKHR = reinterpret_cast<PFN_vkWaitForPresentKHR>(
+                fn_vkGetDeviceProcAddr(m_Vulkan->device, "vkWaitForPresentKHR"));
+            if (fn_vkWaitForPresentKHR != nullptr) {
+                m_MaxPendingPresents = requestedPending;
+            }
+        }
+        if (requestedPending != 0) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Presentation queue budget: %d frame(s), FIFO/VSync retained%s",
+                        m_MaxPendingPresents,
+                        m_MaxPendingPresents == 0 ? " (present wait unavailable)" :
+                        !m_DisplayTimingAvailable ? " (no display timing)" : "");
         }
 
         if (m_DisplayTimingAvailable) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Gamescope presentation timing available (VK_GOOGLE_display_timing)");
-            bool presentIdEnabled = false;
-            bool presentWaitEnabled = false;
-            for (auto feature = reinterpret_cast<const VkBaseInStructure*>(m_Vulkan->features);
-                 feature != nullptr; feature = feature->pNext) {
-                if (feature->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR) {
-                    presentIdEnabled = reinterpret_cast<const VkPhysicalDevicePresentIdFeaturesKHR*>(feature)->presentId;
-                }
-                if (feature->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR) {
-                    presentWaitEnabled = reinterpret_cast<const VkPhysicalDevicePresentWaitFeaturesKHR*>(feature)->presentWait;
-                }
-            }
-            if (vkParams.features != nullptr && presentIdEnabled && presentWaitEnabled) {
-                fn_vkWaitForPresentKHR = reinterpret_cast<PFN_vkWaitForPresentKHR>(
-                    fn_vkGetDeviceProcAddr(m_Vulkan->device, "vkWaitForPresentKHR"));
-                if (fn_vkWaitForPresentKHR != nullptr) {
-                    m_MaxPendingPresents = requestedPending;
-                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "Presentation queue budget: %d frame(s), FIFO/VSync retained",
-                                m_MaxPendingPresents);
+
+            // FIFO deadline wake needs the gate and display timing.
+            m_FifoObserve = m_FifoPresentationRequested && m_MaxPendingPresents == 1;
+            m_FifoDeadlineActive = m_FifoObserve &&
+                                   qEnvironmentVariable("MOONLIGHT_FIFO_DEADLINE", "1") != "0";
+            if (m_FifoObserve) {
+                bool marginValid = false;
+                const int marginUs = qEnvironmentVariableIntValue("MOONLIGHT_FIFO_DEADLINE_MARGIN_US",
+                                                                  &marginValid);
+                m_FifoPolicy.setMarginNs(marginValid && marginUs >= 0 && marginUs <= 5000 ?
+                                             static_cast<uint64_t>(marginUs) * 1000ull : 1000000ull);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "FIFO deadline wake: %s, margin %.3f ms",
+                            m_FifoDeadlineActive ? "enabled" : "observe only",
+                            m_FifoPolicy.marginNs() / 1000000.0);
+                const QByteArray tracePath = qgetenv("MOONLIGHT_FIFO_TRACE");
+                if (!tracePath.isEmpty() && m_FifoTrace == nullptr) {
+                    m_FifoTrace = FifoTraceWriter::open(tracePath);
                 }
             }
         }
@@ -549,6 +686,7 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
                                   m_PacingMode == StreamingPreferences::PM_FIFO;
     m_PresentationFeedbackRequested = m_PresentationSyncRequested ||
                                       m_FifoPresentationRequested || m_PacingDiagnostics;
+    m_FifoDisplayHz = m_FifoPresentationRequested ? StreamUtils::getDisplayRefreshRate(m_Window) : 0;
     m_AdaptivePresentLeadEnabled = m_PresentationSyncRequested &&
                                   m_PacingMode == StreamingPreferences::PM_CURRENT &&
                                   qEnvironmentVariableIntValue("MOONLIGHT_ADAPTIVE_PRESENT_LEAD") == 1;
@@ -690,6 +828,15 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
         return false;
     }
 
+    m_RenderParams = pl_render_fast_params;
+#ifdef Q_OS_LINUX
+    if (m_FifoObserve) {
+        // GPU execution time per pass, for the deadline's render estimate.
+        m_RenderParams.info_callback = PlVkRenderer::renderInfoCallback;
+        m_RenderParams.info_priv = this;
+    }
+#endif
+
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
     SDL_Surface *emptySurface = SDL_CreateRGBSurfaceWithFormat(0, 1, 1, 0, SDL_PIXELFORMAT_ARGB8888);
     if (emptySurface == nullptr) {
@@ -792,7 +939,7 @@ bool PlVkRenderer::createSwapchain(int depth)
     vkSwapchainParams.present_mode = m_VkPresentMode;
     vkSwapchainParams.swapchain_depth = depth;
 #ifdef Q_OS_LINUX
-    if (m_DisplayTimingAvailable) {
+    if (m_DisplayTimingAvailable || m_MaxPendingPresents != 0) {
         vkSwapchainParams.present_hook = PlVkRenderer::presentHook;
         vkSwapchainParams.present_hook_priv = this;
     }
@@ -852,6 +999,13 @@ void PlVkRenderer::resetPresentationTiming(VkSwapchainKHR swapchain)
     m_MissingFeedbackLogged = false;
     m_PresentationHistory.clear();
     m_AdaptivePresentLead.reset();
+    m_FifoPeriodNs = 0;
+    m_FifoPolicy.reset(0);
+    m_FifoRecords = {};
+    m_PrevFeedbackValid = false;
+    m_HasLastRenderedPts = false;
+    m_GateVblankNs = 0;
+    m_LastSubmittedTimingId = 0;
     m_ReadyToSubmitNs.clear();
     m_ReadyToPresentNs.clear();
     m_SubmitToPresentNs.clear();
@@ -903,6 +1057,9 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
 
         receivedNewFeedback = true;
         m_LastFeedbackPresentId = timing.presentID;
+        if (m_FifoObserve) {
+            observeFifoFeedback(timing);
+        }
 
         const auto sample = m_PresentationHistory.take(timing.presentID, timing.actualPresentTime);
         if (sample.id != 0) {
@@ -1008,6 +1165,35 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
                 m_ClockSampleCount = 0;
             }
         }
+
+        if (m_FifoObserve && m_FifoPeriodNs == 0 && m_ClockSampleCount == m_ClockSamples.size()) {
+            if (fn_vkGetRefreshCycleDurationGOOGLE == nullptr) {
+                fn_vkGetRefreshCycleDurationGOOGLE = reinterpret_cast<PFN_vkGetRefreshCycleDurationGOOGLE>(
+                    fn_vkGetDeviceProcAddr(m_Vulkan->device, "vkGetRefreshCycleDurationGOOGLE"));
+            }
+            VkRefreshCycleDurationGOOGLE cycle = {};
+            if (fn_vkGetRefreshCycleDurationGOOGLE == nullptr ||
+                fn_vkGetRefreshCycleDurationGOOGLE(m_Vulkan->device, swapchain, &cycle) != VK_SUCCESS) {
+                cycle.refreshDuration = 0;
+            }
+            // Never trust present intervals alone: a 45 fps source on 90 Hz
+            // presents every other vblank and would look like a 45 Hz panel.
+            const uint64_t validated = validatedDisplayPeriod(cycle.refreshDuration, m_FifoDisplayHz,
+                                                              m_ClockSamples.data(), m_ClockSampleCount);
+            if (validated != 0) {
+                m_FifoPeriodNs = validated;
+                m_FifoPolicy.reset(validated);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "FIFO deadline: validated period %.3f ms (API %.3f ms, display %d Hz)",
+                            validated / 1000000.0, cycle.refreshDuration / 1000000.0, m_FifoDisplayHz);
+            }
+            else if (!m_FifoPeriodLogged) {
+                m_FifoPeriodLogged = true;
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "FIFO deadline: refresh period not validated (display %d Hz); one-frame gate only",
+                            m_FifoDisplayHz);
+            }
+        }
     }
 }
 
@@ -1085,6 +1271,9 @@ void PlVkRenderer::logPresentationTiming(uint64_t nowNs)
     m_ReadyToSubmitNs.clear();
     m_ReadyToPresentNs.clear();
     m_SubmitToPresentNs.clear();
+    if (m_FifoObserve) {
+        logFifoDeadline();
+    }
 
     m_TimingWindowStartNs = nowNs;
     m_TimingMissedVblanks = 0;
@@ -1139,9 +1328,15 @@ void PlVkRenderer::preparePresent(VkSwapchainKHR swapchain,
         resetPresentationTiming(swapchain);
     }
 
-    if (m_RefreshDurationNs == 0 || m_FeedbackPollCountdown == 0) {
+    if (!m_DisplayTimingAvailable) {
+        // FIFO gate without display timing: only the present ID is needed.
+        injectPresentId(presentInfo);
+        return;
+    }
+
+    if (m_RefreshDurationNs == 0 || m_FeedbackPollCountdown == 0 || m_FifoObserve) {
         collectPresentationFeedback(swapchain);
-        m_FeedbackPollCountdown = m_RefreshDurationNs == 0 ? 0 : 7;
+        m_FeedbackPollCountdown = m_RefreshDurationNs == 0 || m_FifoObserve ? 0 : 7;
     }
     else {
         m_FeedbackPollCountdown--;
@@ -1212,28 +1407,42 @@ void PlVkRenderer::preparePresent(VkSwapchainKHR swapchain,
         m_NextPresentId = 1;
     }
     m_PresentTime.desiredPresentTime = desiredPresentTime;
+    m_LastSubmittedTimingId = m_PresentTime.presentID;
 
-    if (m_MaxPendingPresents != 0) {
-        // libplacebo currently supplies no present IDs. Do not inject a second
-        // ID structure if a future version takes ownership of this extension.
-        for (auto next = reinterpret_cast<const VkBaseInStructure*>(presentInfo->pNext);
-             next != nullptr; next = next->pNext) {
-            if (next->sType == VK_STRUCTURE_TYPE_PRESENT_ID_KHR) {
-                m_MaxPendingPresents = 0;
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "Presentation IDs owned by renderer; using existing pacing");
-                break;
-            }
+    if (m_FifoObserve) {
+        FifoRecord& record = m_FifoRecords[m_PresentTime.presentID % m_FifoRecords.size()];
+        if (record.id != 0) {
+            emitFifoRecord(record); // Never received feedback.
         }
-        if (m_MaxPendingPresents != 0) {
-            ++m_SubmittedPresentId;
-            m_HasPendingPresentation = true;
-            m_PresentIdInfo.pNext = presentInfo->pNext;
-            m_PresentIdInfo.swapchainCount = 1;
-            m_PresentIdInfo.pPresentIds = &m_SubmittedPresentId;
-            presentInfo->pNext = &m_PresentIdInfo;
+        record = FifoRecord();
+        record.id = m_PresentTime.presentID;
+        record.pts = m_PendingPts;
+        record.hasPts = m_PendingHasPts;
+        record.receiveNs = m_PendingReceiveNs;
+        record.readyNs = m_PendingDecodeReadyNs;
+        record.renderStartNs = m_RenderStartNs;
+        record.submitNs = nowNs;
+        record.gateNs = m_GateNs;
+        record.gateVblankNs = m_GateVblankNs;
+        record.gateFromFeedback = m_GateFromFeedback;
+        record.queueDepth = static_cast<int16_t>(m_NextPacingInfo.queueDepth);
+        record.drainDrops = static_cast<uint16_t>(std::min<uint32_t>(m_NextPacingInfo.drainDrops, 0xffff));
+        record.otherDrops = static_cast<uint16_t>(std::min<uint32_t>(m_NextPacingInfo.otherDrops, 0xffff));
+        record.action = m_NextPacingInfo.action;
+        record.depth = static_cast<int8_t>(m_FifoPolicy.depth());
+        record.armed = m_FifoPolicy.armed();
+        record.cadenceOk = m_FifoPolicy.cadenceOneToOne();
+        record.leadNs = m_FifoPolicy.leadNs();
+        record.slackLoNs = m_FifoPolicy.slackLoNs();
+        if (m_PendingDecodeReadyNs != 0 && m_FifoPeriodNs != 0 && m_LastActualPresentTimeNs != 0) {
+            record.toVblankNs = fifoToNextVblank(m_PendingDecodeReadyNs, m_LastActualPresentTimeNs,
+                                                 m_FifoPeriodNs);
+            record.frameSlackNs = m_FifoPolicy.armed() ? m_FifoPolicy.frameSlackNs(record.toVblankNs) : 0;
         }
+        m_NextPacingInfo = FramePacingInfo();
     }
+
+    injectPresentId(presentInfo);
 
     m_PresentTimesInfo.sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE;
     m_PresentTimesInfo.pNext = presentInfo->pNext;
@@ -1246,6 +1455,7 @@ void PlVkRenderer::preparePresent(VkSwapchainKHR swapchain,
 #ifdef Q_OS_LINUX
 void PlVkRenderer::waitForPresentationBudget()
 {
+    m_GateVblankNs = 0;
     const uint64_t waitId = presentationToWaitFor(m_SubmittedPresentId, m_MaxPendingPresents);
     if (!m_HasPendingPresentation || waitId == 0 || fn_vkWaitForPresentKHR == nullptr) {
         return;
@@ -1258,7 +1468,127 @@ void PlVkRenderer::waitForPresentationBudget()
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "Presentation wait unavailable (%d); using existing FIFO pacing", result);
         m_MaxPendingPresents = 0;
+        return;
     }
+
+    if (m_FifoObserve && result == VK_SUCCESS && m_TimingSwapchain != VK_NULL_HANDLE) {
+        // Under Gamescope this returns just after the latch that took the
+        // previous present. Record which vblank that latch serves.
+        m_GateNs = monotonicTimeNs();
+        collectPresentationFeedback(m_TimingSwapchain);
+        m_GateFromFeedback = m_LastSubmittedTimingId != 0 &&
+                             m_LastFeedbackPresentId == m_LastSubmittedTimingId &&
+                             m_LastActualPresentTimeNs != 0;
+        if (m_GateFromFeedback) {
+            m_GateVblankNs = m_LastActualPresentTimeNs;
+        }
+        else if (m_FifoPeriodNs != 0 && m_LastActualPresentTimeNs != 0) {
+            m_GateVblankNs = m_GateNs + fifoToNextVblank(m_GateNs, m_LastActualPresentTimeNs,
+                                                         m_FifoPeriodNs);
+        }
+    }
+}
+
+void PlVkRenderer::injectPresentId(VkPresentInfoKHR* presentInfo)
+{
+    if (m_MaxPendingPresents == 0) {
+        return;
+    }
+    // libplacebo currently supplies no present IDs. Do not inject a second
+    // ID structure if a future version takes ownership of this extension.
+    for (auto next = reinterpret_cast<const VkBaseInStructure*>(presentInfo->pNext);
+         next != nullptr; next = next->pNext) {
+        if (next->sType == VK_STRUCTURE_TYPE_PRESENT_ID_KHR) {
+            m_MaxPendingPresents = 0;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Presentation IDs owned by renderer; using existing pacing");
+            return;
+        }
+    }
+    ++m_SubmittedPresentId;
+    m_HasPendingPresentation = true;
+    m_PresentIdInfo.pNext = presentInfo->pNext;
+    m_PresentIdInfo.swapchainCount = 1;
+    m_PresentIdInfo.pPresentIds = &m_SubmittedPresentId;
+    presentInfo->pNext = &m_PresentIdInfo;
+}
+
+void PlVkRenderer::renderInfoCallback(void* priv, const pl_render_info* info)
+{
+    if (info != nullptr && info->pass != nullptr) {
+        static_cast<PlVkRenderer*>(priv)->m_FrameGpuNs += info->pass->last;
+    }
+}
+
+void PlVkRenderer::emitFifoRecord(const FifoRecord& record)
+{
+    if (m_FifoTrace != nullptr) {
+        m_FifoTrace->push(record);
+    }
+}
+
+void PlVkRenderer::observeFifoFeedback(const VkPastPresentationTimingGOOGLE& timing)
+{
+    FifoRecord& record = m_FifoRecords[timing.presentID % m_FifoRecords.size()];
+    if (record.id != timing.presentID) {
+        return;
+    }
+    record.actualNs = timing.actualPresentTime;
+    record.earliestNs = timing.earliestPresentTime;
+    record.desiredNs = timing.desiredPresentTime;
+    record.marginNs = timing.presentMargin;
+    m_FifoPolicy.observeLatchOffset(timing.presentMargin);
+
+    const uint64_t period = m_FifoPeriodNs;
+    if (period != 0 && record.hasPts && m_PrevFeedbackValid) {
+        const uint32_t displayRefreshes = fifoDisplayRefreshes(m_PrevFeedbackActualNs,
+                                                               timing.actualPresentTime, period);
+        const uint32_t sourceRefreshes = fifoSourceRefreshes(record.pts - m_PrevFeedbackPts, period);
+        record.displayRefreshes = static_cast<int32_t>(displayRefreshes);
+        record.sourceRefreshes = static_cast<int32_t>(sourceRefreshes);
+        m_FifoRefreshes += displayRefreshes;
+        // Cadence error on glass vs. source timestamps. Positive: a refresh
+        // repeated although the source had moved on; negative: content skipped.
+        const int error = static_cast<int>(displayRefreshes) - static_cast<int>(sourceRefreshes);
+        if (error > 0) {
+            m_FifoRepeats += static_cast<uint32_t>(error);
+            m_FifoPolicy.observeMiss(monotonicTimeNs());
+        }
+        else if (error < 0) {
+            m_FifoSkips += static_cast<uint32_t>(-error);
+        }
+        // Source frames that never existed (pts gap not explained by our drops).
+        const uint32_t clientDrops = record.drainDrops + record.otherDrops;
+        if (sourceRefreshes > 1 + clientDrops) {
+            m_FifoHostGaps += sourceRefreshes - 1 - clientDrops;
+        }
+    }
+    if (record.hasPts) {
+        m_PrevFeedbackActualNs = timing.actualPresentTime;
+        m_PrevFeedbackPts = record.pts;
+        m_PrevFeedbackValid = true;
+    }
+    emitFifoRecord(record);
+    record.id = 0;
+}
+
+void PlVkRenderer::logFifoDeadline()
+{
+    const FifoDepthPolicy& p = m_FifoPolicy;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "FIFO deadline: %s, armed %d, depth %d, cadence %s, period %.3f ms, "
+                "slack lo/med %.3f/%.3f ms, spread %.3f ms, lead %.3f ms "
+                "(latch %.3f + render %.3f + margin %.3f), backlog frames %u, drains %u, "
+                "waits %u, aborts %u, repeats %u, skips %u, host gaps %u, refreshes %u, hold %.0f s",
+                m_FifoDeadlineActive ? "active" : "observe",
+                p.armed() ? 1 : 0, p.depth(), p.cadenceOneToOne() ? "1:1" : "not 1:1",
+                m_FifoPeriodNs / 1000000.0, p.slackLoNs() / 1000000.0, p.slackMedNs() / 1000000.0,
+                p.spreadNs() / 1000000.0, p.leadNs() / 1000000.0, p.latchHiNs() / 1000000.0,
+                p.renderHiNs() / 1000000.0, p.marginNs() / 1000000.0,
+                m_FifoBacklogFrames, m_FifoDrains, m_FifoWaits, m_FifoAborts,
+                m_FifoRepeats, m_FifoSkips, m_FifoHostGaps, m_FifoRefreshes, p.holdNs() / 1e9);
+    m_FifoBacklogFrames = m_FifoDrains = m_FifoWaits = m_FifoAborts = 0;
+    m_FifoRepeats = m_FifoSkips = m_FifoHostGaps = m_FifoRefreshes = 0;
 }
 #endif
 
@@ -1583,6 +1913,9 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     if (!m_HasPendingSwapchainFrame) {
         return;
     }
+#ifdef Q_OS_LINUX
+    m_RenderStartNs = m_FifoObserve ? monotonicTimeNs() : 0;
+#endif
 
     if (!mapAvFrameToPlacebo(frame, &mappedFrame)) {
         // This function logs internally
@@ -1691,11 +2024,14 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     // For PLVK_USE_EARLY_RENDER_TO_WAIT, we already timed our early render in waitToRender()
     beginRenderTiming();
 #endif
+#ifdef Q_OS_LINUX
+    m_FrameGpuNs = 0;
+#endif
 
     // Render the video image and overlays into the swapchain buffer
     targetFrame.num_overlays = (int)overlays.size();
     targetFrame.overlays = overlays.data();
-    if (!pl_render_image(m_Renderer, &mappedFrame, &targetFrame, &pl_render_fast_params)) {
+    if (!pl_render_image(m_Renderer, &mappedFrame, &targetFrame, &m_RenderParams)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "pl_render_image() failed");
         // NB: We must fallthrough to call pl_swapchain_submit_frame()
@@ -1703,11 +2039,32 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
 
     // Submit the frame for display and swap buffers
 #ifdef Q_OS_LINUX
-    if (m_PacingDiagnostics || m_AdaptivePresentLeadEnabled) {
+    if (m_PacingDiagnostics || m_AdaptivePresentLeadEnabled || m_FifoObserve) {
         const uint64_t beforeUs = LiGetMicroseconds();
         const uint64_t monoNs = monotonicTimeNs();
         const uint64_t afterUs = LiGetMicroseconds();
         m_PendingDecodeReadyNs = decodeReadyMonotonicNs(frame->pkt_dts, beforeUs, monoNs, afterUs);
+    }
+    if (m_FifoObserve) {
+        m_PendingHasPts = frame->pts != AV_NOPTS_VALUE;
+        m_PendingPts = m_PendingHasPts ? static_cast<uint32_t>(frame->pts) : 0;
+        // Receive-complete time (set by the decoder only with diagnostics).
+        const int64_t receivedUs = frame->best_effort_timestamp;
+        m_PendingReceiveNs = m_PendingDecodeReadyNs != 0 && receivedUs > 0 && receivedUs <= frame->pkt_dts &&
+                                     frame->pkt_dts - receivedUs < 1000000 ?
+                                 m_PendingDecodeReadyNs - static_cast<uint64_t>(frame->pkt_dts - receivedUs) * 1000ull : 0;
+        if (m_FifoPeriodNs != 0) {
+            if (m_PendingDecodeReadyNs != 0 && m_LastActualPresentTimeNs != 0) {
+                m_FifoPolicy.observeArrival(fifoToNextVblank(m_PendingDecodeReadyNs,
+                                                             m_LastActualPresentTimeNs, m_FifoPeriodNs));
+            }
+            if (m_PendingHasPts && m_HasLastRenderedPts) {
+                m_FifoPolicy.observeCadence(fifoOneToOneDelta(m_PendingPts - m_LastRenderedPts,
+                                                              m_FifoPeriodNs));
+            }
+        }
+        m_LastRenderedPts = m_PendingPts;
+        m_HasLastRenderedPts = m_PendingHasPts;
     }
 #endif
     m_HasPendingSwapchainFrame = false;
@@ -1728,6 +2085,28 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
 
 #ifndef PLVK_USE_EARLY_RENDER_TO_WAIT
     endRenderTiming();
+#endif
+
+#ifdef Q_OS_LINUX
+    if (m_FifoObserve && m_RenderStartNs != 0) {
+        const uint64_t nowNs = monotonicTimeNs();
+        const uint64_t renderNs = nowNs - m_RenderStartNs + m_FrameGpuNs;
+        m_FifoPolicy.observeRender(renderNs);
+        FifoRecord& record = m_FifoRecords[m_LastSubmittedTimingId % m_FifoRecords.size()];
+        if (record.id == m_LastSubmittedTimingId && record.id != 0) {
+            record.renderNs = renderNs;
+            record.gpuNs = m_FrameGpuNs;
+        }
+        const bool cadence = m_FifoPolicy.cadenceOneToOne();
+        m_FifoPolicy.evaluate(nowNs);
+        if (m_FifoPeriodNs != 0 && cadence != m_LastLoggedCadence) {
+            m_LastLoggedCadence = cadence;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "FIFO deadline: source cadence %s; depth policy %s",
+                        cadence ? "1:1 with the display" : "not 1:1 (e.g. 45 fps on 90 Hz)",
+                        cadence ? "may arm" : "off, one-frame gate unchanged");
+        }
+    }
 #endif
 
 #ifdef PLVK_USE_DYNAMIC_SWAPCHAIN_DEPTH
@@ -1756,6 +2135,9 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
 UnmapExit:
 #ifdef Q_OS_LINUX
     m_PendingDecodeReadyNs = 0;
+    m_PendingReceiveNs = 0;
+    m_PendingHasPts = false;
+    m_RenderStartNs = 0;
 #endif
     // Delete any textures that need to be destroyed
     for (pl_tex& texture : texturesToDestroy) {
@@ -1958,6 +2340,106 @@ bool PlVkRenderer::getSourcePresentationSlot(PresentationSlot& slot)
     Q_UNUSED(slot);
     return false;
 #endif
+}
+
+bool PlVkRenderer::isFifoDeadlineEnabled()
+{
+#ifdef Q_OS_LINUX
+    return m_FifoObserve;
+#else
+    return false;
+#endif
+}
+
+void PlVkRenderer::setFramePacingInfo(const FramePacingInfo& info)
+{
+#ifdef Q_OS_LINUX
+    m_NextPacingInfo = info;
+#else
+    Q_UNUSED(info);
+#endif
+}
+
+IFFmpegRenderer::FifoPlan PlVkRenderer::planFifoFrame(const uint64_t* readyUs, int count)
+{
+    FifoPlan plan;
+#ifdef Q_OS_LINUX
+    const uint64_t period = m_FifoPeriodNs;
+    if (!m_FifoDeadlineActive || count <= 0 || m_GateVblankNs == 0 || period == 0 ||
+        m_LastActualPresentTimeNs == 0 || m_MaxPendingPresents != 1 ||
+        m_PresentsWithoutFeedback > 8 || !m_FifoPolicy.armed()) {
+        return plan; // Existing gate: render the oldest frame now.
+    }
+
+    const uint64_t beforeUs = LiGetMicroseconds();
+    const uint64_t nowNs = monotonicTimeNs();
+    const uint64_t afterUs = LiGetMicroseconds();
+    if (afterUs < beforeUs || afterUs - beforeUs > 250) {
+        return plan;
+    }
+    const uint64_t localUs = beforeUs + (afterUs - beforeUs) / 2;
+    auto toMonotonic = [&](uint64_t us) -> uint64_t {
+        const uint64_t ageNs = us < localUs ? (localUs - us) * 1000ull : 0;
+        return nowNs > ageNs ? nowNs - ageNs : 0;
+    };
+
+    const uint64_t lead = m_FifoPolicy.leadNs();
+    const uint64_t nextVblank = m_GateVblankNs + period;
+    if (nowNs + lead >= nextVblank) {
+        return plan; // Past the deadline for the next vblank; change nothing.
+    }
+
+    // Vblank the arrival cluster assigns to a frame at depth 0.
+    auto nominal = [&](uint64_t arrivalNs, int64_t* slack) -> uint64_t {
+        const uint64_t toVblank = fifoToNextVblank(arrivalNs, m_LastActualPresentTimeNs, period);
+        if (slack != nullptr) {
+            *slack = m_FifoPolicy.frameSlackNs(toVblank);
+        }
+        const int64_t index = m_FifoPolicy.nominalVblank(toVblank);
+        return arrivalNs + toVblank + static_cast<uint64_t>(index * static_cast<int64_t>(period));
+    };
+
+    const uint64_t headArrival = toMonotonic(readyUs[0]);
+    if (headArrival == 0 || nominal(headArrival, nullptr) + period / 2 > nextVblank) {
+        return plan; // Head belongs to the next vblank: depth 0 already.
+    }
+    // The head missed its own slot: a standing one-frame backlog (depth 1).
+    ++m_FifoBacklogFrames;
+    if (!m_FifoPolicy.drainAllowed(nowNs)) {
+        return plan;
+    }
+
+    if (count >= 2) {
+        int64_t slack = 0;
+        const uint64_t secondArrival = toMonotonic(readyUs[1]);
+        const uint64_t second = secondArrival != 0 ? nominal(secondArrival, &slack) : 0;
+        const bool secondDue = second + period / 2 > nextVblank && second < nextVblank + period / 2;
+        const bool thirdLater = count < 3 || nominal(toMonotonic(readyUs[2]), nullptr) >= nextVblank + period / 2;
+        if (secondDue && slack >= 0 && thirdLater) {
+            // Spend exactly one drop to reach depth 0; never reorder.
+            m_FifoPolicy.noteDrain(nowNs);
+            ++m_FifoDrains;
+            plan.action = FifoAction::DropHead;
+        }
+        return plan;
+    }
+
+    // Only the backlog frame: wait (at most until the deadline) for the frame
+    // that is due at the next vblank, then drain; otherwise show the head.
+    const uint64_t deadlineNs = nextVblank - lead;
+    if (nowNs + 50000 < deadlineNs) {
+        plan.action = FifoAction::WaitUntil;
+        plan.untilUs = localUs + (deadlineNs - nowNs) / 1000;
+        ++m_FifoWaits;
+        return plan;
+    }
+    ++m_FifoAborts;
+    m_FifoPolicy.observeMiss(nowNs); // Model was wrong; back off.
+#else
+    Q_UNUSED(readyUs);
+    Q_UNUSED(count);
+#endif
+    return plan;
 }
 
 int PlVkRenderer::getDecoderColorspace()
