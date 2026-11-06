@@ -36,13 +36,18 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: apt-debs
-          key: appimage-apt-v2-${{ steps.setup.outputs.image }}-${{ steps.setup.outputs.deps }}
-          restore-keys: appimage-apt-v2-${{ steps.setup.outputs.image }}-
+          key: appimage-apt-v3-${{ steps.setup.outputs.image }}-${{ steps.setup.outputs.deps }}
+          restore-keys: |
+            appimage-apt-v3-${{ steps.setup.outputs.image }}-
+            appimage-apt-v2-${{ steps.setup.outputs.image }}-
 
       - name: Setup environment
         run: |
           echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/99keep-downloads
           scripts/appimage-deps.sh setup apt-debs
+          # ccache is only used for Moonlight itself, so it stays out of the dependency script
+          sudo apt install -y ccache
+          cp /var/cache/apt/archives/ccache_*.deb /var/cache/apt/archives/libhiredis*.deb apt-debs/
           mkdir -p dep_root/{bin,include,lib}
           echo "DEP_ROOT=$PWD/dep_root" >> "${GITHUB_ENV}"
           echo "$PWD/dep_root/bin" >> "${GITHUB_PATH}"
