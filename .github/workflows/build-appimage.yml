@@ -103,6 +103,50 @@ jobs:
           wget https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy*.AppImage
 
+      - name: Test stream policies
+        run: |
+          python3 tests/deckspatial_test.py
+          cc -std=c11 -O2 -Wall -Wextra -Werror tests/speakersafety_test.c -lm -o /tmp/speakersafety-test
+          /tmp/speakersafety-test
+          sudo ldconfig
+          c++ -std=c++17 -Wall -Wextra -Werror -pthread \
+            -Itests/deckmicrophone_stubs -Iapp \
+            tests/deckmicrophone_test.cpp app/streaming/deckmicrophone.cpp \
+            -lopus -o /tmp/deckmicrophone-test
+          /tmp/deckmicrophone-test
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            app/streaming/lifecycle/recoverypolicy.cpp \
+            app/streaming/lifecycle/recoverysettings.cpp \
+            tests/recoverypolicy_test.cpp \
+            -o /tmp/recoverypolicy-test
+          /tmp/recoverypolicy-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror -pthread \
+            tests/adaptivebuffer_test.cpp -o /tmp/adaptivebuffer-test
+          /tmp/adaptivebuffer-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror \
+            tests/lowlatency_test.cpp -o /tmp/lowlatency-test
+          /tmp/lowlatency-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror \
+            tests/fifodepth_test.cpp -o /tmp/fifodepth-test
+          /tmp/fifodepth-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror tests/fifotrim_test.cpp -o /tmp/fifotrim-test
+          /tmp/fifotrim-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror tests/fifodepthctl_test.cpp -o /tmp/fifodepthctl-test
+          /tmp/fifodepthctl-test
+          mkdir -p /tmp/sdlaudio-build
+          pushd /tmp/sdlaudio-build
+          qmake6 "$GITHUB_WORKSPACE/tests/sdlaudio_test.pro"
+          make -j2
+          ./sdlaudio-test
+          popd
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            tests/deckprotocol_test.cpp \
+            -o /tmp/deckprotocol-test
+            /tmp/deckprotocol-test
+            c++ -std=c++17 -Wall -Wextra -Werror \
+              tests/sourcetimeline_test.cpp -o /tmp/sourcetimeline-test
+            /tmp/sourcetimeline-test
+
       - name: Build Binaries
         run: |
           sudo ldconfig
@@ -115,3 +159,4 @@ jobs:
           path: build/installer-release/Moonlight-${{ env.CI_VERSION }}-x86_64.AppImage
           compression-level: 0
           if-no-files-found: error
+          retention-days: 1

@@ -18,13 +18,13 @@
 
 set -euo pipefail
 
-SDL3_REF=release-3.4.14
-SDL2_COMPAT_REF=release-2.32.70
+SDL3_REF=release-3.4.18
+SDL2_COMPAT_REF=release-2.32.74
 SDL_TTF_REF=a883e490e30fb44a5336ea3dcb990c6982c5216f
 LIBVA_REF=2.24.1
-LIBPLACEBO_REF=4d82c6898551068d4ae6a6b5538efcddc2c7cf64
+LIBPLACEBO_REF=92b5ac6db79f4d680eb656692f7bf51e9606f42a
 DAV1D_VER=1.5.4
-FFMPEG_REF=n9.0
+FFMPEG_REF=n9.0.2
 
 SOURCE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 DEPS_DIR=$SOURCE_ROOT/deps
@@ -127,7 +127,7 @@ build()
   fetch libva intel/libva $LIBVA_REF
   pushd "$DEPS_DIR/libva"
   ./autogen.sh
-  ./configure --enable-x11
+  ./configure --enable-x11=yes --enable-glx=no --enable-drm=no --enable-wayland=no
   make -j$(nproc)
   make install DESTDIR="$STAGE"
   popd
