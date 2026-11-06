@@ -2,7 +2,8 @@
 #
 # Build environment and third-party libraries for the Linux AppImage (Ubuntu 22.04).
 #
-#   scripts/appimage-deps.sh setup             install the distro build packages
+#   scripts/appimage-deps.sh setup [debs]      install the distro build packages, reusing
+#                                              and refreshing downloaded .deb files in [debs]
 #   scripts/appimage-deps.sh build <stage>     build the libraries and install them
 #   scripts/appimage-deps.sh restore <stage>   install a stage saved by an earlier build
 #
@@ -30,6 +31,10 @@ DEPS_DIR=$SOURCE_ROOT/deps
 
 setup()
 {
+  local debs=${1:-}
+  if [ -n "$debs" ] && compgen -G "$debs/*.deb" >/dev/null; then
+    sudo cp "$debs"/*.deb /var/cache/apt/archives/
+  fi
   wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
   sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-1.4.313-jammy.list https://packages.lunarg.com/vulkan/1.4.313/lunarg-vulkan-1.4.313-jammy.list
   sudo apt update
@@ -39,6 +44,13 @@ setup()
     libxext-dev libxi-dev libxinerama-dev libxkbcommon-dev libxrandr-dev libxss-dev libxt-dev libxv-dev libxxf86vm-dev libxcb-dri3-dev libx11-xcb-dev \
     libxfixes-dev libxtst-dev wayland-protocols libopus-dev libvdpau-dev libgl-dev libpipewire-0.3-dev liburing-dev vulkan-sdk cmake
   sudo pip3 install meson
+  if [ -n "$debs" ]; then
+    mkdir -p "$debs"
+    if compgen -G "/var/cache/apt/archives/*.deb" >/dev/null; then
+      cp /var/cache/apt/archives/*.deb "$debs"/
+    fi
+    echo "$(ls "$debs" | wc -l) downloaded packages kept in $debs"
+  fi
 }
 
 # fetch <dir> <github repo> <tag or commit> [--submodules]
@@ -61,13 +73,15 @@ fetch()
   fi
 }
 
-# Copy the stage into the live prefix, as "sudo make install" used to do.
+# Copy the stage into the live prefix, as "sudo make install" used to do. Files end up
+# owned by root; directories that already exist (such as /usr/local/bin, which the
+# runner user can write to) keep their owner and mode.
 sync_stage()
 {
   local stray
   stray=$(cd "$STAGE" && find . -mindepth 1 -maxdepth 3 ! -path ./usr ! -path ./usr/local ! -path './usr/local/*')
   [ -z "$stray" ] || { echo "Installed outside /usr/local: $stray" >&2; exit 1; }
-  sudo cp -a --no-preserve=ownership "$STAGE/usr/local/." /usr/local/
+  tar -C "$STAGE/usr/local" -cf - . | sudo tar -C /usr/local -xf - --no-overwrite-dir --no-same-owner
   sudo ldconfig
 }
 
@@ -161,7 +175,7 @@ build()
 
 case "${1:-}" in
   setup)
-    setup
+    setup "${2:-}"
     ;;
   build)
     STAGE=$(realpath -m "${2:?stage directory required}")

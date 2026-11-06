@@ -23,14 +23,35 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 1
 
-      - name: Setup environment
+      - name: Cache keys
         id: setup
         run: |
-          scripts/appimage-deps.sh setup
+          echo "image=${ImageOS}" >> "${GITHUB_OUTPUT}"
+          echo "deps=${{ hashFiles('scripts/appimage-deps.sh', 'app/deploy/linux/appimage/*.patch') }}" >> "${GITHUB_OUTPUT}"
+
+      # Downloaded .deb files only: apt still resolves versions as usual and fetches
+      # anything newer than what the cache holds.
+      - name: Restore apt download cache
+        id: apt-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: apt-debs
+          key: appimage-apt-v1-${{ steps.setup.outputs.image }}-${{ steps.setup.outputs.deps }}
+          restore-keys: appimage-apt-v1-${{ steps.setup.outputs.image }}-
+
+      - name: Setup environment
+        run: |
+          scripts/appimage-deps.sh setup apt-debs
           mkdir -p dep_root/{bin,include,lib}
           echo "DEP_ROOT=$PWD/dep_root" >> "${GITHUB_ENV}"
           echo "$PWD/dep_root/bin" >> "${GITHUB_PATH}"
-          echo "image=${ImageOS}" >> "${GITHUB_OUTPUT}"
+
+      - name: Save apt download cache
+        if: steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: apt-debs
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
 
       # The libraries below only change when scripts/appimage-deps.sh or the libplacebo
       # patches do, so their installed files are cached and reused across runs.
@@ -39,7 +60,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: deps-stage
-          key: appimage-deps-v1-${{ steps.setup.outputs.image }}-${{ hashFiles('scripts/appimage-deps.sh', 'app/deploy/linux/appimage/*.patch') }}
+          key: appimage-deps-v1-${{ steps.setup.outputs.image }}-${{ steps.setup.outputs.deps }}
 
       - name: Build dependencies
         if: steps.deps-cache.outputs.cache-hit != 'true'
