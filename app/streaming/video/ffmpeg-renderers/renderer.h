@@ -237,6 +237,9 @@ public:
     };
     virtual void setFramePacingInfo(const FramePacingInfo&) {}
 
+    // Decoder thread, as each decoded frame is handed to the pacer.
+    virtual void notifyFrameDecoded(AVFrame*) {}
+
     // Called on the same thread as renderFrame() during destruction of the renderer
     virtual void cleanupRenderContext() {
         // Nothing

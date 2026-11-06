@@ -64,6 +64,13 @@ public:
     // CLOCK_MONOTONIC time the fence for fenceSeq signalled, 0 if not (yet) known.
     uint64_t fenceSignalNs(uint32_t fenceSeq);
 
+    // Decoder thread: time this frame's decode completion (keyed by its
+    // decode-ready stamp in microseconds, frame->pkt_dts). readyNs is the
+    // same instant in CLOCK_MONOTONIC.
+    void trackDecode(const AVFrame* frame, uint64_t key, uint64_t readyNs);
+    // Decode completion for key, 0 if unknown.
+    uint64_t decodeDoneNs(uint64_t key);
+
     static uint64_t nowNs();
 
 private:
@@ -116,12 +123,23 @@ private:
     uint32_t m_NextFenceSeq = 0;
     std::mutex m_PollLock;
     std::condition_variable m_PollWake;
-    std::deque<std::pair<uint32_t, int>> m_PollQueue;
+    struct PollJob {
+        uint64_t key = 0;
+        bool decode = false; // trackDecode() job: fd is a dma-buf, else a sync_file
+        int fd = -1;
+        uint64_t readyNs = 0;
+    };
+    std::deque<PollJob> m_PollQueue;
     struct FenceTime {
-        uint32_t seq = 0;
+        uint64_t seq = 0;
         uint64_t ns = 0;
     };
     std::array<FenceTime, 512> m_FenceTimes = {};
+    std::array<FenceTime, 512> m_DecodeTimes = {};
+    void finishDecodeJob(const PollJob& job);
+    // trackDecode() surface -> dma-buf (object 0) cache, decoder thread only
+    const void* m_TrackFramesCtx = nullptr;
+    std::vector<std::pair<uintptr_t, int>> m_TrackFds;
     bool m_PollStop = false;
     std::thread m_Poller;
 };

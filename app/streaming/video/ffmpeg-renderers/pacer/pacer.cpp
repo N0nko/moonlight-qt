@@ -982,6 +982,8 @@ void Pacer::submitFrame(AVFrame* frame)
     // Make sure initialize() has been called
     SDL_assert(m_MaxVideoFps != 0);
 
+    m_VsyncRenderer->notifyFrameDecoded(frame);
+
     // Queue the frame and possibly wake up the render thread
     m_FrameQueueLock.lock();
     if (m_SourceTimingEnabled) {

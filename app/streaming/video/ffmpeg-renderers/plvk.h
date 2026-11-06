@@ -13,6 +13,7 @@
 #include <libplacebo/vulkan.h>
 
 #include <array>
+#include <atomic>
 #include <vector>
 
 #ifdef Q_OS_DARWIN
@@ -60,6 +61,9 @@ public:
     virtual bool isFifoDeadlineEnabled() override;
     virtual FifoPlan planFifoFrame(const uint64_t* readyUs, int count) override;
     virtual void setFramePacingInfo(const FramePacingInfo& info) override;
+#ifdef Q_OS_LINUX
+    virtual void notifyFrameDecoded(AVFrame* frame) override;
+#endif
     virtual bool fifoDepthOnArrival() override;
     virtual bool fifoDepthGate(bool backlog, int queued, bool hostExtra) override;
     virtual void cleanupRenderContext() override;
@@ -159,6 +163,8 @@ private:
         uint64_t submitEndNs = 0;
         uint64_t decodeDoneNs = 0; // decode fence signalled (0: unknown)
         uint64_t gpuDoneNs = 0;    // estimated render completion
+        uint64_t readyKey = 0;     // frame->pkt_dts (decode-ready, us), decode tracker key
+        uint64_t estWorkNs = 0;    // on-arrival work this frame would have had
     };
     void emitFifoRecord(const FifoRecord& record);
 #endif
@@ -338,19 +344,19 @@ private:
     uint32_t m_RenderedFrames = 0;
     bool m_LogPasses = false;
     struct RenderStats {
-        std::vector<uint32_t> map, wait, render, submit, acquire, decode, work, gpu;
+        std::vector<uint32_t> map, wait, render, submit, acquire, decode, work, gpu, est;
         uint32_t paths[3] = {};
         void clear()
         {
             map.clear(); wait.clear(); render.clear(); submit.clear();
-            acquire.clear(); decode.clear(); work.clear(); gpu.clear();
+            acquire.clear(); decode.clear(); work.clear(); gpu.clear(); est.clear();
             paths[0] = paths[1] = paths[2] = 0;
         }
     } m_RenderStats;
     void logRenderStats();
 #endif
 #ifdef PLVK_HAVE_VAAPI_DIRECT_MAP
-    PlVkVaapiMapper* m_VaapiMapper = nullptr;
+    std::atomic<PlVkVaapiMapper*> m_VaapiMapper{nullptr};
     bool m_VaapiMapperTried = false;
     bool m_MappedDirect = false;
     uint8_t m_LastMapPath = 0;

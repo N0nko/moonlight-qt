@@ -85,7 +85,7 @@ private:
               "frame_slack_ns,slack_lo_ns,lead_ns,render_ns,gpu_ns,queue_depth,drain_drops,other_drops,"
               "action,depth,armed,cadence_ok,display_refreshes,source_refreshes,lost,"
               "ctl_state,backlog,on_arrival,work_ns,ctl_slack_ns,ctl_slack_lo_ns,"
-              "map_path,map_ns,cpu_wait_ns,render_cpu_ns,submit_cpu_ns,acquire_ns,decode_done_ns,gpu_done_ns\n", m_File);
+              "map_path,map_ns,cpu_wait_ns,render_cpu_ns,submit_cpu_ns,acquire_ns,decode_done_ns,gpu_done_ns,est_work_ns\n", m_File);
         m_Thread = std::thread([this] { run(); });
     }
 
@@ -105,7 +105,7 @@ private:
                 fprintf(m_File,
                         "%u,%s%u,%llu,%llu,%llu,%llu,%llu,%llu,%d,%llu,%llu,%llu,%llu,%llu,%lld,"
                         "%lld,%lld,%llu,%llu,%llu,%d,%u,%u,%u,%d,%d,%d,%d,%d,%u,%u,%d,%d,%llu,%lld,%lld,"
-                        "%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+                        "%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
                         r.id, r.hasPts ? "" : "-", r.pts,
                         (unsigned long long)r.receiveNs, (unsigned long long)r.readyNs,
                         (unsigned long long)r.renderStartNs, (unsigned long long)r.submitNs,
@@ -124,7 +124,8 @@ private:
                         static_cast<unsigned>(r.mapPath), (unsigned long long)r.mapNs,
                         (unsigned long long)r.cpuWaitNs, (unsigned long long)r.renderCpuNs,
                         (unsigned long long)r.submitCpuNs, (unsigned long long)r.acquireNs,
-                        (unsigned long long)r.decodeDoneNs, (unsigned long long)r.gpuDoneNs);
+                        (unsigned long long)r.decodeDoneNs, (unsigned long long)r.gpuDoneNs,
+                        (unsigned long long)r.estWorkNs);
             }
             rows.clear();
             fflush(m_File);
@@ -293,8 +294,7 @@ PlVkRenderer::~PlVkRenderer()
 
     if (m_Vulkan != nullptr) {
 #ifdef PLVK_HAVE_VAAPI_DIRECT_MAP
-        delete m_VaapiMapper;
-        m_VaapiMapper = nullptr;
+        delete m_VaapiMapper.exchange(nullptr);
 #endif
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
         pl_tex_destroy(m_Vulkan->gpu, &m_EmptyOverlay.tex);
@@ -1572,10 +1572,14 @@ void PlVkRenderer::observeFifoFeedback(const VkPastPresentationTimingGOOGLE& tim
     const uint64_t observedNs = monotonicTimeNs();
     if (record.submitEndNs != 0) {
 #ifdef PLVK_HAVE_VAAPI_DIRECT_MAP
-        if (record.fenceSeq != 0 && m_VaapiMapper != nullptr) {
-            record.decodeDoneNs = m_VaapiMapper->fenceSignalNs(record.fenceSeq);
+        PlVkVaapiMapper* mapper = m_VaapiMapper.load();
+        if (mapper != nullptr) {
+            record.decodeDoneNs = mapper->decodeDoneNs(record.readyKey);
+            if (record.decodeDoneNs == 0 && record.fenceSeq != 0) {
+                record.decodeDoneNs = mapper->fenceSignalNs(record.fenceSeq);
+            }
         }
-        else
+        if (record.decodeDoneNs == 0)
 #endif
         if (record.mapPath == 2 && record.cpuWaitNs > 20000) {
             // Waited on the CPU: the decode finished when the map did.
@@ -1583,6 +1587,20 @@ void PlVkRenderer::observeFifoFeedback(const VkPastPresentationTimingGOOGLE& tim
         }
         if (record.decodeDoneNs != 0) {
             record.gpuDoneNs = std::max(record.submitStartNs, record.decodeDoneNs) + record.gpuNs;
+        }
+        // The on-arrival work this frame would have had with the GPU-side
+        // decode wait: rendered at decode-ready (plus the render thread's wake),
+        // with its own CPU times, decode completion and GPU time.
+        if (record.decodeDoneNs > record.readyNs && record.readyNs != 0 &&
+            record.renderStartNs != 0 && record.submitStartNs >= record.renderStartNs &&
+            record.submitEndNs >= record.submitStartNs) {
+            constexpr uint64_t kWakeNs = 100000;
+            const uint64_t startNs = record.readyNs + kWakeNs;
+            const uint64_t gpuStartNs = std::max(startNs + (record.submitStartNs - record.renderStartNs),
+                                                 record.decodeDoneNs);
+            const uint64_t doneNs = std::max(startNs + (record.submitEndNs - record.renderStartNs),
+                                             gpuStartNs + record.gpuNs);
+            record.estWorkNs = doneNs - record.readyNs;
         }
         if (record.mapPath == 1) {
             // GPU-side decode wait: done when both the present call returned
@@ -1611,6 +1629,9 @@ void PlVkRenderer::observeFifoFeedback(const VkPastPresentationTimingGOOGLE& tim
         if (record.onArrival && record.workNs != 0) {
             st.work.push_back(us(record.workNs));
         }
+        if (record.estWorkNs != 0) {
+            st.est.push_back(us(record.estWorkNs));
+        }
     }
     m_FifoPolicy.observeLatchOffset(timing.presentMargin, observedNs);
     m_FifoDepth.observeLatchOffset(timing.presentMargin, observedNs);
@@ -1620,7 +1641,11 @@ void PlVkRenderer::observeFifoFeedback(const VkPastPresentationTimingGOOGLE& tim
         timing.actualPresentTime > timing.presentMargin + record.readyNs) {
         const uint64_t latchNs = timing.actualPresentTime - timing.presentMargin;
         const uint64_t phaseNs = (latchNs - record.readyNs) % m_FifoPeriodNs;
-        record.ctlSlackNs = m_FifoDepth.observeFrame(phaseNs, record.onArrival, record.workNs);
+        // A frame rendered on arrival reports its measured work; any other
+        // frame with a timed decode reports the work it would have had.
+        const bool ownWork = (record.onArrival && record.workNs != 0) || record.estWorkNs != 0;
+        const uint64_t workNs = record.onArrival && record.workNs != 0 ? record.workNs : record.estWorkNs;
+        record.ctlSlackNs = m_FifoDepth.observeFrame(phaseNs, ownWork, ownWork ? workNs : record.workNs);
         record.ctlSlackLoNs = m_FifoDepth.slackSamples() >= FifoDepthController::kMinSlackSamples ?
                                   m_FifoDepth.slackLoNs() : 0;
     }
@@ -1697,6 +1722,24 @@ void PlVkRenderer::logFifoDeadline()
     logRenderStats();
 }
 
+void PlVkRenderer::notifyFrameDecoded(AVFrame* frame)
+{
+#ifdef PLVK_HAVE_VAAPI_DIRECT_MAP
+    PlVkVaapiMapper* mapper = m_VaapiMapper.load();
+    if (mapper != nullptr && m_FifoObserve && frame != nullptr && frame->format == AV_PIX_FMT_VAAPI &&
+        frame->pkt_dts > 0) {
+        const uint64_t nowUs = LiGetMicroseconds();
+        const uint64_t nowMono = monotonicTimeNs();
+        const uint64_t readyUs = static_cast<uint64_t>(frame->pkt_dts);
+        if (readyUs <= nowUs && nowUs - readyUs < 1000000) {
+            mapper->trackDecode(frame, readyUs, nowMono - (nowUs - readyUs) * 1000ull);
+        }
+    }
+#else
+    Q_UNUSED(frame);
+#endif
+}
+
 void PlVkRenderer::logRenderStats()
 {
     RenderStats& st = m_RenderStats;
@@ -1715,13 +1758,15 @@ void PlVkRenderer::logRenderStats()
                 "FIFO render: frames %zu (map path lib/gpu-wait/cpu-wait %u/%u/%u), "
                 "map p50/p99 %.3f/%.3f ms (cpu decode wait %.3f/%.3f), render cpu %.3f/%.3f, "
                 "submit+present %.3f/%.3f, acquire %.3f/%.3f, gpu %.3f/%.3f, "
-                "ready->decode done %.3f/%.3f (n %zu), on-arrival work p50/p99.9 %.3f/%.3f ms (n %zu)",
+                "ready->decode done %.3f/%.3f (n %zu), on-arrival work p50/p99.9 %.3f/%.3f ms (n %zu), "
+                "estimated on-arrival work p50/p99.9 %.3f/%.3f ms (n %zu)",
                 st.map.size(), st.paths[0], st.paths[1], st.paths[2],
                 pct(st.map, 0.5), pct(st.map, 0.99), pct(st.wait, 0.5), pct(st.wait, 0.99),
                 pct(st.render, 0.5), pct(st.render, 0.99), pct(st.submit, 0.5), pct(st.submit, 0.99),
                 pct(st.acquire, 0.5), pct(st.acquire, 0.99), pct(st.gpu, 0.5), pct(st.gpu, 0.99),
                 pct(st.decode, 0.5), pct(st.decode, 0.99), st.decode.size(),
-                pct(st.work, 0.5), pct(st.work, 0.999), st.work.size());
+                pct(st.work, 0.5), pct(st.work, 0.999), st.work.size(),
+                pct(st.est, 0.5), pct(st.est, 0.999), st.est.size());
     st.clear();
 }
 #endif
@@ -1755,21 +1800,22 @@ bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFra
         if (!m_VaapiMapperTried) {
             m_VaapiMapperTried = true;
             if (qgetenv("MOONLIGHT_PLVK_VAAPI_DIRECT") != "0") {
-                m_VaapiMapper = new PlVkVaapiMapper(m_Vulkan, fn_vkGetDeviceProcAddr, m_FifoObserve);
+                m_VaapiMapper.store(new PlVkVaapiMapper(m_Vulkan, fn_vkGetDeviceProcAddr, m_FifoObserve));
             }
             else {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "VAAPI direct map: off (MOONLIGHT_PLVK_VAAPI_DIRECT=0)");
             }
         }
-        if (m_VaapiMapper != nullptr && m_VaapiMapper->usable()) {
+        PlVkVaapiMapper* mapper = m_VaapiMapper.load();
+        if (mapper != nullptr && mapper->usable()) {
             // pkt_dts carries the decode-ready time in LiGetMicroseconds().
             const uint64_t nowUs = LiGetMicroseconds();
             const uint64_t ageNs = frame->pkt_dts > 0 && (uint64_t)frame->pkt_dts <= nowUs &&
                                            nowUs - (uint64_t)frame->pkt_dts < 1000000 ?
                                        (nowUs - (uint64_t)frame->pkt_dts) * 1000ull : 0;
             PlVkVaapiMapper::MapInfo info;
-            if (m_VaapiMapper->map(frame, ageNs, mappedFrame, &info)) {
+            if (mapper->map(frame, ageNs, mappedFrame, &info)) {
                 m_MappedDirect = true;
                 m_LastMapPath = info.path;
                 m_LastCpuWaitNs = info.cpuWaitNs;
@@ -1826,7 +1872,7 @@ void PlVkRenderer::unmapAvFrameFromPlacebo(const AVFrame *frame, pl_frame* mappe
 #ifdef PLVK_HAVE_VAAPI_DIRECT_MAP
     if (m_MappedDirect) {
         m_MappedDirect = false;
-        m_VaapiMapper->unmap();
+        m_VaapiMapper.load()->unmap();
         return;
     }
 #endif
@@ -2322,6 +2368,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
             record.cpuWaitNs = m_LastCpuWaitNs;
             record.fenceSeq = m_LastFenceSeq;
 #endif
+            record.readyKey = frame->pkt_dts > 0 ? static_cast<uint64_t>(frame->pkt_dts) : 0;
             // Rendered on arrival: the queue was empty when the gate opened.
             if (record.readyNs != 0 && record.gateNs != 0 && record.readyNs > record.gateNs &&
                 m_RenderStartNs >= record.readyNs && m_RenderStartNs - record.readyNs < 1000000) {

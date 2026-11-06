@@ -104,7 +104,7 @@ PlVkVaapiMapper::PlVkVaapiMapper(pl_vulkan vulkan, PFN_vkGetDeviceProcAddr getDe
 
     m_Usable = true;
     m_GpuWait = fn_vkImportSemaphoreFdKHR != nullptr;
-    m_TrackFences = trackFences && m_GpuWait;
+    m_TrackFences = trackFences;
     m_Entries.reserve(64);
     if (m_TrackFences) {
         m_Poller = std::thread([this] { pollerMain(); });
@@ -126,6 +126,9 @@ PlVkVaapiMapper::~PlVkVaapiMapper()
         m_Poller.join();
     }
     for (auto& item : m_PollQueue) {
+        close(item.fd);
+    }
+    for (auto& item : m_TrackFds) {
         close(item.second);
     }
     flush();
@@ -513,7 +516,10 @@ bool PlVkVaapiMapper::map(const AVFrame* frame, uint64_t frameAgeNs, pl_frame* o
         info->fenceSeq = m_NextFenceSeq;
         {
             std::lock_guard<std::mutex> lock(m_PollLock);
-            m_PollQueue.emplace_back(m_NextFenceSeq, trackFd);
+            PollJob job;
+            job.key = m_NextFenceSeq;
+            job.fd = trackFd;
+            m_PollQueue.push_back(job);
         }
         m_PollWake.notify_one();
     }
@@ -555,6 +561,104 @@ uint64_t PlVkVaapiMapper::fenceSignalNs(uint32_t fenceSeq)
     return t.seq == fenceSeq ? t.ns : 0;
 }
 
+void PlVkVaapiMapper::trackDecode(const AVFrame* frame, uint64_t key, uint64_t readyNs)
+{
+    if (!m_TrackFences || m_SyncFileBroken || frame == nullptr || frame->hw_frames_ctx == nullptr || key == 0) {
+        return;
+    }
+    auto hwfc = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
+    if (hwfc != m_TrackFramesCtx) {
+        for (auto& item : m_TrackFds) {
+            close(item.second);
+        }
+        m_TrackFds.clear();
+        m_TrackFramesCtx = hwfc;
+    }
+    const uintptr_t surface = reinterpret_cast<uintptr_t>(frame->data[3]);
+    int fd = -1;
+    for (auto& item : m_TrackFds) {
+        if (item.first == surface) {
+            fd = item.second;
+        }
+    }
+    if (fd < 0) {
+        if (m_TrackFds.size() >= 64) {
+            return;
+        }
+        auto vaDevice = reinterpret_cast<const AVVAAPIDeviceContext*>(hwfc->device_ctx->hwctx);
+        VADRMPRIMESurfaceDescriptor vaDesc = {};
+        if (vaExportSurfaceHandle(vaDevice->display, static_cast<VASurfaceID>(surface),
+                                  VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                                  VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
+                                  &vaDesc) != VA_STATUS_SUCCESS || vaDesc.num_objects == 0) {
+            return;
+        }
+        fd = vaDesc.objects[0].fd;
+        for (uint32_t i = 1; i < vaDesc.num_objects; i++) {
+            close(vaDesc.objects[i].fd);
+        }
+        m_TrackFds.emplace_back(surface, fd);
+    }
+    PollJob job;
+    job.key = key;
+    job.decode = true;
+    job.fd = dup(fd);
+    job.readyNs = readyNs;
+    if (job.fd < 0) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_PollLock);
+        if (m_PollQueue.size() > 64) {
+            close(job.fd);
+            return;
+        }
+        m_PollQueue.push_back(job);
+    }
+    m_PollWake.notify_one();
+}
+
+uint64_t PlVkVaapiMapper::decodeDoneNs(uint64_t key)
+{
+    if (key == 0) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(m_PollLock);
+    const FenceTime& t = m_DecodeTimes[key % m_DecodeTimes.size()];
+    return t.seq == key ? t.ns : 0;
+}
+
+// Poller thread. A decode job only counts once its fence has been seen
+// pending (attached by the kernel); a fence that is signalled from the first
+// look for 1.5 ms after decode-ready gives no completion time.
+void PlVkVaapiMapper::finishDecodeJob(const PollJob& job)
+{
+    uint64_t doneNs = 0;
+    for (;;) {
+        const int sync = exportReadFence(job.fd);
+        if (sync < 0) {
+            break;
+        }
+        if (!fenceSignalled(sync)) {
+            pollfd p = {sync, POLLIN, 0};
+            const int r = poll(&p, 1, 500);
+            doneNs = r == 1 ? nowNs() : 0;
+            close(sync);
+            break;
+        }
+        close(sync);
+        if (nowNs() >= job.readyNs + kSubmitRaceNs) {
+            break;
+        }
+        sleepNs(kSpinStepNs);
+    }
+    close(job.fd);
+    std::lock_guard<std::mutex> lock(m_PollLock);
+    FenceTime& slot = m_DecodeTimes[job.key % m_DecodeTimes.size()];
+    slot.seq = job.key;
+    slot.ns = doneNs;
+}
+
 void PlVkVaapiMapper::pollerMain()
 {
     std::unique_lock<std::mutex> lock(m_PollLock);
@@ -563,16 +667,21 @@ void PlVkVaapiMapper::pollerMain()
         if (m_PollStop) {
             return;
         }
-        const std::pair<uint32_t, int> item = m_PollQueue.front();
+        const PollJob item = m_PollQueue.front();
         m_PollQueue.pop_front();
         lock.unlock();
-        pollfd p = {item.second, POLLIN, 0};
+        if (item.decode) {
+            finishDecodeJob(item);
+            lock.lock();
+            continue;
+        }
+        pollfd p = {item.fd, POLLIN, 0};
         const int r = poll(&p, 1, 500);
         const uint64_t t = nowNs();
-        close(item.second);
+        close(item.fd);
         lock.lock();
-        FenceTime& slot = m_FenceTimes[item.first % m_FenceTimes.size()];
-        slot.seq = item.first;
+        FenceTime& slot = m_FenceTimes[item.key % m_FenceTimes.size()];
+        slot.seq = item.key;
         slot.ns = r == 1 ? t : 0;
     }
 }
