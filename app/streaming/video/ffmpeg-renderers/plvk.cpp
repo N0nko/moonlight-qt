@@ -75,8 +75,7 @@ private:
         m_Pending.reserve(4096);
         fseek(m_File, 0, SEEK_END);
         if (ftell(m_File) > 0) {
-            fputs("# renderer restart
-", m_File);
+            fputs("# renderer restart\n", m_File);
         }
         fputs("present_id,pts,receive_ns,ready_ns,render_start_ns,submit_ns,gate_ns,gate_vblank_ns,"
               "gate_from_feedback,actual_ns,earliest_ns,desired_ns,margin_ns,to_vblank_ns,c_ns,"
