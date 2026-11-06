@@ -621,7 +621,7 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
                 const int marginUs = qEnvironmentVariableIntValue("MOONLIGHT_FIFO_DEADLINE_MARGIN_US",
                                                                   &marginValid);
                 m_FifoPolicy.setMarginNs(marginValid && marginUs >= 0 && marginUs <= 5000 ?
-                                             static_cast<uint64_t>(marginUs) * 1000ull : 1000000ull);
+                                             static_cast<uint64_t>(marginUs) * 1000ull : 2000000ull);
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "FIFO deadline wake: %s, margin %.3f ms",
                             m_FifoDeadlineActive ? "enabled" : "observe only",
@@ -1537,7 +1537,8 @@ void PlVkRenderer::observeFifoFeedback(const VkPastPresentationTimingGOOGLE& tim
     record.earliestNs = timing.earliestPresentTime;
     record.desiredNs = timing.desiredPresentTime;
     record.marginNs = timing.presentMargin;
-    m_FifoPolicy.observeLatchOffset(timing.presentMargin);
+    const uint64_t observedNs = monotonicTimeNs();
+    m_FifoPolicy.observeLatchOffset(timing.presentMargin, observedNs);
 
     const uint64_t period = m_FifoPeriodNs;
     if (period != 0 && record.hasPts && m_PrevFeedbackValid) {
@@ -1552,7 +1553,7 @@ void PlVkRenderer::observeFifoFeedback(const VkPastPresentationTimingGOOGLE& tim
         const int error = static_cast<int>(displayRefreshes) - static_cast<int>(sourceRefreshes);
         if (error > 0) {
             m_FifoRepeats += static_cast<uint32_t>(error);
-            m_FifoPolicy.observeMiss(monotonicTimeNs());
+            m_FifoPolicy.observeMiss(observedNs);
         }
         else if (error < 0) {
             m_FifoSkips += static_cast<uint32_t>(-error);
@@ -1561,6 +1562,7 @@ void PlVkRenderer::observeFifoFeedback(const VkPastPresentationTimingGOOGLE& tim
         const uint32_t clientDrops = record.drainDrops + record.otherDrops;
         if (sourceRefreshes > 1 + clientDrops) {
             m_FifoHostGaps += sourceRefreshes - 1 - clientDrops;
+            m_FifoPolicy.observeDisturbance(observedNs);
         }
     }
     if (record.hasPts) {

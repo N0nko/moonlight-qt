@@ -18,7 +18,7 @@ void prime(FifoDepthPolicy& p, uint64_t period, uint64_t toVblank, uint64_t jitt
     p.setMarginNs(1000000);
     for (size_t i = 0; i < FifoDepthPolicy::kCadenceWindow; ++i) p.observeCadence(true);
     for (size_t i = 0; i < 64; ++i) {
-        p.observeLatchOffset(latch);
+        p.observeLatchOffset(latch, 0);
         p.observeRender(render);
     }
     for (size_t i = 0; i < FifoDepthPolicy::kArrivalWindow; ++i) {
@@ -110,6 +110,22 @@ int main()
         assert(p.holdNs() == FifoDepthPolicy::kBaseHoldNs);
     }
 
+    // Host gaps and latch-offset jumps block drains for 10 s.
+    {
+        FifoDepthPolicy p;
+        prime(p, kT90, 9 * kMs, 1 * kMs);
+        p.evaluate(10 * FifoDepthPolicy::kSecond);
+        assert(p.drainAllowed(15 * FifoDepthPolicy::kSecond));
+        p.observeDisturbance(15 * FifoDepthPolicy::kSecond);
+        assert(!p.drainAllowed(24 * FifoDepthPolicy::kSecond));
+        assert(p.drainAllowed(25 * FifoDepthPolicy::kSecond));
+        p.observeLatchOffset(4500000 + 400000, 26 * FifoDepthPolicy::kSecond); // small: fine
+        assert(p.drainAllowed(27 * FifoDepthPolicy::kSecond));
+        p.observeLatchOffset(4500000 + 600000, 28 * FifoDepthPolicy::kSecond); // jump
+        assert(!p.drainAllowed(37 * FifoDepthPolicy::kSecond));
+        assert(p.drainAllowed(38 * FifoDepthPolicy::kSecond));
+    }
+
     // Not enough slack: arrivals 7 ms before vblank, 1.5 ms worst jitter vs lead 6.3.
     {
         FifoDepthPolicy p;
@@ -147,7 +163,7 @@ int main()
         p.reset(kT90);
         p.setMarginNs(1000000);
         for (size_t i = 0; i < FifoDepthPolicy::kCadenceWindow; ++i) p.observeCadence(true);
-        for (int i = 0; i < 64; ++i) { p.observeLatchOffset(4500000); p.observeRender(800000); }
+        for (int i = 0; i < 64; ++i) { p.observeLatchOffset(4500000, 0); p.observeRender(800000); }
         const uint64_t lead = 6300000;
         for (size_t i = 0; i < FifoDepthPolicy::kArrivalWindow; ++i) {
             // s around T - 0.5 ms, early by up to 1 ms (crossing to s ~ 0.5 ms).
@@ -176,7 +192,7 @@ int main()
         FifoDepthPolicy p;
         p.reset(kT90);
         for (size_t i = 0; i < FifoDepthPolicy::kCadenceWindow; ++i) p.observeCadence(true);
-        p.observeLatchOffset(4500000);
+        p.observeLatchOffset(4500000, 0);
         p.observeRender(800000);
         for (size_t i = 0; i < FifoDepthPolicy::kArrivalWindow; ++i) {
             p.observeArrival(1 + (i * 7919) % kT90);
@@ -208,6 +224,22 @@ int main()
         p.setMarginNs(1500000);
         p.reset(kT60);
         assert(p.periodNs() == kT60 && p.marginNs() == 1500000 && p.arrivals() == 0);
+    }
+
+    // Default margin is 2 ms; fewer than a full window of arrivals never arms.
+    {
+        FifoDepthPolicy p;
+        assert(p.marginNs() == 2000000);
+        p.reset(kT90);
+        for (size_t i = 0; i < FifoDepthPolicy::kCadenceWindow; ++i) p.observeCadence(true);
+        p.observeLatchOffset(4500000, 0);
+        p.observeRender(800000);
+        for (size_t i = 0; i + 1 < FifoDepthPolicy::kArrivalWindow; ++i) p.observeArrival(9 * kMs);
+        p.evaluate(1);
+        assert(!p.armed());
+        p.observeArrival(9 * kMs);
+        p.evaluate(2 * FifoDepthPolicy::kSecond);
+        assert(p.armed() && p.depth() == 0);
     }
 
     std::puts("fifodepth policy tests passed");

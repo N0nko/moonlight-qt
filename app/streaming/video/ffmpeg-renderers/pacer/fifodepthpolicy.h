@@ -67,15 +67,17 @@ inline uint64_t fifoToNextVblank(uint64_t t, uint64_t anchor, uint64_t period)
 class FifoDepthPolicy {
 public:
     static constexpr size_t kArrivalWindow = 2048; // ~23 s at 90 Hz
-    static constexpr size_t kRenderWindow = 256;
-    static constexpr size_t kLatchWindow = 512;
+    static constexpr size_t kRenderWindow = 2048;
+    static constexpr size_t kLatchWindow = 4096;   // ~45 s at 90 Hz
     static constexpr size_t kCadenceWindow = 64;
     static constexpr size_t kCadenceRequired = 58;
-    static constexpr size_t kMinArrivals = 512;
+    static constexpr size_t kMinArrivals = kArrivalWindow; // >= 2000 frames before arming
     static constexpr uint64_t kSecond = 1000000000ull;
     static constexpr uint64_t kBaseHoldNs = 10 * kSecond;  // >= 10 s between drains
     static constexpr uint64_t kMaxHoldNs = 160 * kSecond;
     static constexpr uint64_t kQuietNs = 5 * kSecond;      // >= 5 s without misses
+    static constexpr uint64_t kDisturbedNs = 10 * kSecond; // after host gaps / latch jumps
+    static constexpr uint64_t kLatchJumpNs = 500000;
     static constexpr uint64_t kEvalNs = kSecond;
 
     void reset(uint64_t periodNs)
@@ -108,10 +110,14 @@ public:
     }
 
     // Gamescope's presentMargin: target vblank minus the latch that took the commit.
-    void observeLatchOffset(uint64_t marginNs)
+    // A jump above the recent maximum (overlay, draw-time sawtooth) blocks drains.
+    void observeLatchOffset(uint64_t marginNs, uint64_t nowNs)
     {
         if (marginNs == 0 || m_PeriodNs == 0 || marginNs >= m_PeriodNs) {
             return;
+        }
+        if (m_LatchHiNs != 0 && marginNs > m_LatchHiNs + kLatchJumpNs) {
+            observeDisturbance(nowNs);
         }
         m_Latch[m_LatchNext] = static_cast<uint32_t>(marginNs);
         m_LatchNext = (m_LatchNext + 1) % kLatchWindow;
@@ -146,6 +152,9 @@ public:
     }
 
     void noteDrain(uint64_t nowNs) { m_LastDrainNs = nowNs; }
+
+    // Host-side source gap or compositor disturbance: no drain for 10 s.
+    void observeDisturbance(uint64_t nowNs) { m_LastDisturbanceNs = nowNs; }
 
     // Recompute statistics at most once per second.
     void evaluate(uint64_t nowNs)
@@ -254,6 +263,8 @@ public:
         return m_Armed && m_Depth == 0 &&
                m_ArmedSinceNs != 0 && nowNs >= m_ArmedSinceNs && nowNs - m_ArmedSinceNs >= kQuietNs &&
                (m_LastMissNs == 0 || (nowNs >= m_LastMissNs && nowNs - m_LastMissNs >= kQuietNs)) &&
+               (m_LastDisturbanceNs == 0 ||
+                (nowNs >= m_LastDisturbanceNs && nowNs - m_LastDisturbanceNs >= kDisturbedNs)) &&
                (m_LastDrainNs == 0 || (nowNs >= m_LastDrainNs && nowNs - m_LastDrainNs >= m_HoldNs));
     }
 
@@ -280,7 +291,7 @@ private:
     }
 
     uint64_t m_PeriodNs = 0;
-    uint64_t m_MarginNs = 1000000;
+    uint64_t m_MarginNs = 2000000;
     std::array<uint32_t, kArrivalWindow> m_Arrivals{};
     size_t m_ArrivalNext = 0;
     size_t m_ArrivalCount = 0;
@@ -308,5 +319,6 @@ private:
     uint64_t m_ArmedSinceNs = 0;
     uint64_t m_LastMissNs = 0;
     uint64_t m_LastDrainNs = 0;
+    uint64_t m_LastDisturbanceNs = 0;
     uint64_t m_HoldNs = kBaseHoldNs;
 };
