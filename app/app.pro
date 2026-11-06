@@ -376,6 +376,10 @@ libplacebo {
     macx {
         SOURCES += streaming/video/ffmpeg-renderers/plvk_objc.mm
     }
+    libva:!win32:!macx {
+        SOURCES += streaming/video/ffmpeg-renderers/plvkvaapi.cpp
+        HEADERS += streaming/video/ffmpeg-renderers/plvkvaapi.h
+    }
 }
 config_EGL {
     message(EGL renderer selected)

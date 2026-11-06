@@ -3,6 +3,9 @@
 #include "streaming/session.h"
 #include "streaming/streamutils.h"
 #include "pacer/displayperiod.h"
+#ifdef PLVK_HAVE_VAAPI_DIRECT_MAP
+#include "plvkvaapi.h"
+#endif
 
 // Implementation in plvk_c.c
 #define PL_LIBAV_IMPLEMENTATION 0
@@ -81,7 +84,8 @@ private:
               "gate_from_feedback,actual_ns,earliest_ns,desired_ns,margin_ns,to_vblank_ns,c_ns,"
               "frame_slack_ns,slack_lo_ns,lead_ns,render_ns,gpu_ns,queue_depth,drain_drops,other_drops,"
               "action,depth,armed,cadence_ok,display_refreshes,source_refreshes,lost,"
-              "ctl_state,backlog,on_arrival,work_ns,ctl_slack_ns,ctl_slack_lo_ns\n", m_File);
+              "ctl_state,backlog,on_arrival,work_ns,ctl_slack_ns,ctl_slack_lo_ns,"
+              "map_path,map_ns,cpu_wait_ns,render_cpu_ns,submit_cpu_ns,acquire_ns,decode_done_ns,gpu_done_ns\n", m_File);
         m_Thread = std::thread([this] { run(); });
     }
 
@@ -100,7 +104,8 @@ private:
                     static_cast<int64_t>(r.toVblankNs) - static_cast<int64_t>(r.marginNs) : 0;
                 fprintf(m_File,
                         "%u,%s%u,%llu,%llu,%llu,%llu,%llu,%llu,%d,%llu,%llu,%llu,%llu,%llu,%lld,"
-                        "%lld,%lld,%llu,%llu,%llu,%d,%u,%u,%u,%d,%d,%d,%d,%d,%u,%u,%d,%d,%llu,%lld,%lld\n",
+                        "%lld,%lld,%llu,%llu,%llu,%d,%u,%u,%u,%d,%d,%d,%d,%d,%u,%u,%d,%d,%llu,%lld,%lld,"
+                        "%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
                         r.id, r.hasPts ? "" : "-", r.pts,
                         (unsigned long long)r.receiveNs, (unsigned long long)r.readyNs,
                         (unsigned long long)r.renderStartNs, (unsigned long long)r.submitNs,
@@ -115,7 +120,11 @@ private:
                         r.action, r.depth, r.armed ? 1 : 0, r.cadenceOk ? 1 : 0,
                         r.displayRefreshes, r.sourceRefreshes, lost,
                         static_cast<unsigned>(r.ctlState), r.backlog ? 1 : 0, r.onArrival ? 1 : 0,
-                        (unsigned long long)r.workNs, (long long)r.ctlSlackNs, (long long)r.ctlSlackLoNs);
+                        (unsigned long long)r.workNs, (long long)r.ctlSlackNs, (long long)r.ctlSlackLoNs,
+                        static_cast<unsigned>(r.mapPath), (unsigned long long)r.mapNs,
+                        (unsigned long long)r.cpuWaitNs, (unsigned long long)r.renderCpuNs,
+                        (unsigned long long)r.submitCpuNs, (unsigned long long)r.acquireNs,
+                        (unsigned long long)r.decodeDoneNs, (unsigned long long)r.gpuDoneNs);
             }
             rows.clear();
             fflush(m_File);
@@ -283,6 +292,10 @@ PlVkRenderer::~PlVkRenderer()
 #endif
 
     if (m_Vulkan != nullptr) {
+#ifdef PLVK_HAVE_VAAPI_DIRECT_MAP
+        delete m_VaapiMapper;
+        m_VaapiMapper = nullptr;
+#endif
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
         pl_tex_destroy(m_Vulkan->gpu, &m_EmptyOverlay.tex);
 #endif
@@ -1526,7 +1539,16 @@ void PlVkRenderer::injectPresentId(VkPresentInfoKHR* presentInfo)
 void PlVkRenderer::renderInfoCallback(void* priv, const pl_render_info* info)
 {
     if (info != nullptr && info->pass != nullptr) {
-        static_cast<PlVkRenderer*>(priv)->m_FrameGpuNs += info->pass->last;
+        auto me = static_cast<PlVkRenderer*>(priv);
+        me->m_FrameGpuNs += info->pass->last;
+        if (me->m_LogPasses) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "libplacebo pass %d (stage %d): %s, last %.3f ms, average %.3f ms",
+                        info->index, (int)info->stage,
+                        info->pass->shader && info->pass->shader->description ?
+                            info->pass->shader->description : "?",
+                        info->pass->last / 1e6, info->pass->average / 1e6);
+        }
     }
 }
 
@@ -1548,6 +1570,48 @@ void PlVkRenderer::observeFifoFeedback(const VkPastPresentationTimingGOOGLE& tim
     record.desiredNs = timing.desiredPresentTime;
     record.marginNs = timing.presentMargin;
     const uint64_t observedNs = monotonicTimeNs();
+    if (record.submitEndNs != 0) {
+#ifdef PLVK_HAVE_VAAPI_DIRECT_MAP
+        if (record.fenceSeq != 0 && m_VaapiMapper != nullptr) {
+            record.decodeDoneNs = m_VaapiMapper->fenceSignalNs(record.fenceSeq);
+        }
+        else
+#endif
+        if (record.mapPath == 2 && record.cpuWaitNs > 20000) {
+            // Waited on the CPU: the decode finished when the map did.
+            record.decodeDoneNs = record.renderStartNs + record.mapNs;
+        }
+        if (record.decodeDoneNs != 0) {
+            record.gpuDoneNs = std::max(record.submitStartNs, record.decodeDoneNs) + record.gpuNs;
+        }
+        if (record.mapPath == 1) {
+            // GPU-side decode wait: done when both the present call returned
+            // and the GPU finished (decode, then render). Unknown -> no sample.
+            const uint64_t doneNs = record.decodeDoneNs != 0 ?
+                                        std::max(record.submitEndNs, record.gpuDoneNs) : 0;
+            if (doneNs != 0 && record.renderStartNs != 0 && doneNs > record.renderStartNs) {
+                m_FifoPolicy.observeRender(doneNs - record.renderStartNs);
+            }
+            if (record.onArrival) {
+                record.workNs = doneNs > record.readyNs && record.readyNs != 0 ? doneNs - record.readyNs : 0;
+            }
+        }
+        RenderStats& st = m_RenderStats;
+        auto us = [](uint64_t ns) { return static_cast<uint32_t>(std::min<uint64_t>(ns / 1000, UINT32_MAX)); };
+        st.paths[std::min<uint8_t>(record.mapPath, 2)]++;
+        st.map.push_back(us(record.mapNs));
+        st.wait.push_back(us(record.cpuWaitNs));
+        st.render.push_back(us(record.renderCpuNs));
+        st.submit.push_back(us(record.submitCpuNs));
+        st.acquire.push_back(us(record.acquireNs));
+        st.gpu.push_back(us(record.gpuNs));
+        if (record.decodeDoneNs > record.readyNs && record.readyNs != 0) {
+            st.decode.push_back(us(record.decodeDoneNs - record.readyNs));
+        }
+        if (record.onArrival && record.workNs != 0) {
+            st.work.push_back(us(record.workNs));
+        }
+    }
     m_FifoPolicy.observeLatchOffset(timing.presentMargin, observedNs);
     m_FifoDepth.observeLatchOffset(timing.presentMargin, observedNs);
     // Slack this frame has (on arrival) or would have (backlog) at depth 0:
@@ -1630,6 +1694,35 @@ void PlVkRenderer::logFifoDeadline()
                 d.lateExits(), d.backlogExits(), d.holdNs() / 1e9);
     m_FifoDepthGates[0] = m_FifoDepthGates[1] = m_FifoDepthGates[2] = 0;
     m_FifoDepthBacklogGates = 0;
+    logRenderStats();
+}
+
+void PlVkRenderer::logRenderStats()
+{
+    RenderStats& st = m_RenderStats;
+    auto pct = [](std::vector<uint32_t>& v, double q) -> double {
+        if (v.empty()) {
+            return 0.0;
+        }
+        const size_t i = std::min(v.size() - 1, static_cast<size_t>(q * v.size()));
+        std::nth_element(v.begin(), v.begin() + i, v.end());
+        return v[i] / 1000.0;
+    };
+    if (st.map.empty()) {
+        return;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "FIFO render: frames %zu (map path lib/gpu-wait/cpu-wait %u/%u/%u), "
+                "map p50/p99 %.3f/%.3f ms (cpu decode wait %.3f/%.3f), render cpu %.3f/%.3f, "
+                "submit+present %.3f/%.3f, acquire %.3f/%.3f, gpu %.3f/%.3f, "
+                "ready->decode done %.3f/%.3f (n %zu), on-arrival work p50/p99.9 %.3f/%.3f ms (n %zu)",
+                st.map.size(), st.paths[0], st.paths[1], st.paths[2],
+                pct(st.map, 0.5), pct(st.map, 0.99), pct(st.wait, 0.5), pct(st.wait, 0.99),
+                pct(st.render, 0.5), pct(st.render, 0.99), pct(st.submit, 0.5), pct(st.submit, 0.99),
+                pct(st.acquire, 0.5), pct(st.acquire, 0.99), pct(st.gpu, 0.5), pct(st.gpu, 0.99),
+                pct(st.decode, 0.5), pct(st.decode, 0.99), st.decode.size(),
+                pct(st.work, 0.5), pct(st.work, 0.999), st.work.size());
+    st.clear();
 }
 #endif
 
@@ -1651,8 +1744,44 @@ bool PlVkRenderer::prepareDecoderContext(AVCodecContext *context, AVDictionary *
     return true;
 }
 
-bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFrame)
+bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFrame, bool allowDirect)
 {
+#ifdef PLVK_HAVE_VAAPI_DIRECT_MAP
+    m_MappedDirect = false;
+    m_LastMapPath = 0;
+    m_LastCpuWaitNs = 0;
+    m_LastFenceSeq = 0;
+    if (allowDirect && frame->format == AV_PIX_FMT_VAAPI) {
+        if (!m_VaapiMapperTried) {
+            m_VaapiMapperTried = true;
+            if (qgetenv("MOONLIGHT_PLVK_VAAPI_DIRECT") != "0") {
+                m_VaapiMapper = new PlVkVaapiMapper(m_Vulkan, fn_vkGetDeviceProcAddr, m_FifoObserve);
+            }
+            else {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "VAAPI direct map: off (MOONLIGHT_PLVK_VAAPI_DIRECT=0)");
+            }
+        }
+        if (m_VaapiMapper != nullptr && m_VaapiMapper->usable()) {
+            // pkt_dts carries the decode-ready time in LiGetMicroseconds().
+            const uint64_t nowUs = LiGetMicroseconds();
+            const uint64_t ageNs = frame->pkt_dts > 0 && (uint64_t)frame->pkt_dts <= nowUs &&
+                                           nowUs - (uint64_t)frame->pkt_dts < 1000000 ?
+                                       (nowUs - (uint64_t)frame->pkt_dts) * 1000ull : 0;
+            PlVkVaapiMapper::MapInfo info;
+            if (m_VaapiMapper->map(frame, ageNs, mappedFrame, &info)) {
+                m_MappedDirect = true;
+                m_LastMapPath = info.path;
+                m_LastCpuWaitNs = info.cpuWaitNs;
+                m_LastFenceSeq = info.fenceSeq;
+            }
+        }
+    }
+    if (!m_MappedDirect)
+#else
+    Q_UNUSED(allowDirect);
+#endif
+    {
 #ifdef Q_OS_DARWIN
     if (frame->format == AV_PIX_FMT_VIDEOTOOLBOX) {
         if (!m_MetalTextureFactory->mapVideoToolboxToPlacebo(frame, mappedFrame)) {
@@ -1670,6 +1799,7 @@ bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFra
                          "pl_map_avframe_ex() failed");
             return false;
         }
+    }
     }
 
     // libplacebo assumes a minimum luminance value of 0 means the actual value was unknown.
@@ -1693,6 +1823,13 @@ bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFra
 
 void PlVkRenderer::unmapAvFrameFromPlacebo(const AVFrame *frame, pl_frame* mappedFrame)
 {
+#ifdef PLVK_HAVE_VAAPI_DIRECT_MAP
+    if (m_MappedDirect) {
+        m_MappedDirect = false;
+        m_VaapiMapper->unmap();
+        return;
+    }
+#endif
 #ifdef Q_OS_DARWIN
     if (frame->format == AV_PIX_FMT_VIDEOTOOLBOX) {
         m_MetalTextureFactory->unmapVideoToolboxFromPlacebo(mappedFrame);
@@ -1904,8 +2041,14 @@ void PlVkRenderer::waitToRender()
     // NB: After calling this successfully, we *MUST* call pl_swapchain_submit_frame(),
     // hence the implementation of cleanupRenderContext() which does just this in case
     // renderFrame() wasn't called after waitToRender().
+#ifdef Q_OS_LINUX
+    const uint64_t acquireStartNs = m_FifoObserve ? monotonicTimeNs() : 0;
+#endif
     if (pl_swapchain_start_frame(m_Swapchain, &m_SwapchainFrame)) {
         m_HasPendingSwapchainFrame = true;
+#ifdef Q_OS_LINUX
+        m_LastAcquireNs = acquireStartNs != 0 ? monotonicTimeNs() - acquireStartNs : 0;
+#endif
 
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
         // This is a workaround for MoltenVK which lazily fetches a drawable when the
@@ -1958,10 +2101,14 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     m_RenderStartNs = m_FifoObserve ? monotonicTimeNs() : 0;
 #endif
 
-    if (!mapAvFrameToPlacebo(frame, &mappedFrame)) {
+    if (!mapAvFrameToPlacebo(frame, &mappedFrame, true)) {
         // This function logs internally
         return;
     }
+#ifdef Q_OS_LINUX
+    const uint64_t mapEndNs = m_FifoObserve ? monotonicTimeNs() : 0;
+    m_LogPasses = m_FifoObserve && ++m_RenderedFrames == 300;
+#endif
 
     // Adjust the swapchain if the colorspace of incoming frames has changed
     if (!pl_color_space_equal(&mappedFrame.color, &m_LastColorspace)) {
@@ -2072,11 +2219,18 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     // Render the video image and overlays into the swapchain buffer
     targetFrame.num_overlays = (int)overlays.size();
     targetFrame.overlays = overlays.data();
+#ifdef Q_OS_LINUX
+    const uint64_t renderCpuStartNs = m_FifoObserve ? monotonicTimeNs() : 0;
+#endif
     if (!pl_render_image(m_Renderer, &mappedFrame, &targetFrame, &m_RenderParams)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "pl_render_image() failed");
         // NB: We must fallthrough to call pl_swapchain_submit_frame()
     }
+#ifdef Q_OS_LINUX
+    const uint64_t renderCpuEndNs = m_FifoObserve ? monotonicTimeNs() : 0;
+    m_LogPasses = false;
+#endif
 
     // Submit the frame for display and swap buffers
 #ifdef Q_OS_LINUX
@@ -2117,6 +2271,9 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     }
 #endif
     m_HasPendingSwapchainFrame = false;
+#ifdef Q_OS_LINUX
+    const uint64_t submitStartNs = m_FifoObserve ? monotonicTimeNs() : 0;
+#endif
     if (!pl_swapchain_submit_frame(m_Swapchain)) {
 #ifdef Q_OS_LINUX
         // The failed submission may have retired its swapchain.
@@ -2140,11 +2297,31 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     if (m_FifoObserve && m_RenderStartNs != 0) {
         const uint64_t nowNs = monotonicTimeNs();
         const uint64_t renderNs = nowNs - m_RenderStartNs + m_FrameGpuNs;
-        m_FifoPolicy.observeRender(renderNs);
+#ifdef PLVK_HAVE_VAAPI_DIRECT_MAP
+        const uint8_t mapPath = m_LastMapPath;
+#else
+        const uint8_t mapPath = 0;
+#endif
+        // With the GPU waiting for the decode, the CPU time says nothing about
+        // when the frame is done: feed the deadline policy at feedback instead.
+        if (mapPath != 1) {
+            m_FifoPolicy.observeRender(renderNs);
+        }
         FifoRecord& record = m_FifoRecords[m_LastSubmittedTimingId % m_FifoRecords.size()];
         if (record.id == m_LastSubmittedTimingId && record.id != 0) {
             record.renderNs = renderNs;
             record.gpuNs = m_FrameGpuNs;
+            record.mapPath = mapPath;
+            record.mapNs = mapEndNs - m_RenderStartNs;
+            record.renderCpuNs = renderCpuEndNs - renderCpuStartNs;
+            record.submitStartNs = submitStartNs;
+            record.submitEndNs = nowNs;
+            record.submitCpuNs = nowNs - submitStartNs;
+            record.acquireNs = m_LastAcquireNs;
+#ifdef PLVK_HAVE_VAAPI_DIRECT_MAP
+            record.cpuWaitNs = m_LastCpuWaitNs;
+            record.fenceSeq = m_LastFenceSeq;
+#endif
             // Rendered on arrival: the queue was empty when the gate opened.
             if (record.readyNs != 0 && record.gateNs != 0 && record.readyNs > record.gateNs &&
                 m_RenderStartNs >= record.readyNs && m_RenderStartNs - record.readyNs < 1000000) {

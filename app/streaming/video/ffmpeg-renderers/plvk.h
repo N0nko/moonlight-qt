@@ -41,6 +41,10 @@ private:
 #endif
 
 class FifoTraceWriter;
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBVA)
+#define PLVK_HAVE_VAAPI_DIRECT_MAP 1
+class PlVkVaapiMapper;
+#endif
 
 class PlVkRenderer : public IFFmpegRenderer {
     friend class FifoTraceWriter;
@@ -78,7 +82,7 @@ private:
 
     bool createSwapchain(int depth);
     bool createOverlay(pl_overlay* overlay, SDL_Surface* surface);
-    bool mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFrame);
+    bool mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFrame, bool allowDirect = false);
     void unmapAvFrameFromPlacebo(const AVFrame *frame, pl_frame* mappedFrame);
     bool populateQueues(int videoFormat);
     bool chooseVulkanDevice(PDECODER_PARAMETERS params, bool hdrOutputRequired);
@@ -143,6 +147,18 @@ private:
         uint64_t workNs = 0;      // decode-ready to submit + GPU
         int64_t ctlSlackNs = 0;   // slack sample fed to the controller
         int64_t ctlSlackLoNs = 0; // controller's p99.9 slack after this frame
+        // On-arrival work breakdown (CPU times on the render thread)
+        uint8_t mapPath = 0;       // PlVkVaapiMapper::Path
+        uint32_t fenceSeq = 0;     // decode fence timed by the mapper
+        uint64_t mapNs = 0;        // map incl. any CPU decode wait
+        uint64_t cpuWaitNs = 0;    // part of mapNs spent waiting for the decode
+        uint64_t renderCpuNs = 0;  // pl_render_image()
+        uint64_t submitCpuNs = 0;  // pl_swapchain_submit_frame() (queue submit + present)
+        uint64_t acquireNs = 0;    // pl_swapchain_start_frame() in waitToRender()
+        uint64_t submitStartNs = 0;
+        uint64_t submitEndNs = 0;
+        uint64_t decodeDoneNs = 0; // decode fence signalled (0: unknown)
+        uint64_t gpuDoneNs = 0;    // estimated render completion
     };
     void emitFifoRecord(const FifoRecord& record);
 #endif
@@ -317,5 +333,28 @@ private:
     uint32_t m_FifoDepthBacklogGates = 0;
     uint64_t m_FifoWindowStartNs = 0;
     FifoTraceWriter* m_FifoTrace = nullptr;
+    // Per-frame work breakdown
+    uint64_t m_LastAcquireNs = 0;
+    uint32_t m_RenderedFrames = 0;
+    bool m_LogPasses = false;
+    struct RenderStats {
+        std::vector<uint32_t> map, wait, render, submit, acquire, decode, work, gpu;
+        uint32_t paths[3] = {};
+        void clear()
+        {
+            map.clear(); wait.clear(); render.clear(); submit.clear();
+            acquire.clear(); decode.clear(); work.clear(); gpu.clear();
+            paths[0] = paths[1] = paths[2] = 0;
+        }
+    } m_RenderStats;
+    void logRenderStats();
+#endif
+#ifdef PLVK_HAVE_VAAPI_DIRECT_MAP
+    PlVkVaapiMapper* m_VaapiMapper = nullptr;
+    bool m_VaapiMapperTried = false;
+    bool m_MappedDirect = false;
+    uint8_t m_LastMapPath = 0;
+    uint64_t m_LastCpuWaitNs = 0;
+    uint32_t m_LastFenceSeq = 0;
 #endif
 };
