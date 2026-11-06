@@ -215,6 +215,14 @@ public:
     virtual bool isFifoDeadlineEnabled() { return false; }
     virtual FifoPlan planFifoFrame(const uint64_t*, int) { return FifoPlan(); }
 
+    // FIFO queue-depth controller (FifoDepthController). Render thread only,
+    // with the pacer's queue lock held; must not block.
+    // fifoDepthOnArrival(): the stream runs at depth 0 (render on arrival).
+    // fifoDepthGate(): called at every present gate after the trim; true means
+    // drop every queued frame once and render the next arrival.
+    virtual bool fifoDepthOnArrival() { return false; }
+    virtual bool fifoDepthGate(bool /*backlog*/, int /*queued*/, bool /*hostExtra*/) { return false; }
+
     // Diagnostics for the next renderFrame() call (per-frame trace only).
     struct FramePacingInfo {
         int queueDepth = 0;
@@ -222,8 +230,10 @@ public:
         uint32_t otherDrops = 0;
         // 0 render head, 1 drained, 2 waited for deadline; FIFO trim:
         // 3 slotless drop, 4 slotless kept after waiting, 5 recovery drop,
-        // 6 backlog drop, 7 slotless drop after waiting for the follower
+        // 6 backlog drop, 7 slotless drop after waiting for the follower;
+        // depth controller: 8 drain to depth 0, 9 lone slotless drop at depth 0
         uint8_t action = 0;
+        bool backlog = false; // the head was queued before the gate opened
     };
     virtual void setFramePacingInfo(const FramePacingInfo&) {}
 

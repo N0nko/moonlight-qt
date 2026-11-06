@@ -382,9 +382,11 @@ AVFrame* Pacer::takeSourceFrameLocked()
 void Pacer::applyFifoTrimLocked(uint64_t gateUs, IFFmpegRenderer::FramePacingInfo& info)
 {
     uint64_t nowUs = LiGetMicroseconds();
-    const bool starved = FifoBacklogTrim::starvedSlot(gateUs, nowUs, m_FifoTrimPeriodUs);
+    bool starved = FifoBacklogTrim::starvedSlot(gateUs, nowUs, m_FifoTrimPeriodUs);
     const uint64_t deadlineUs = gateUs != 0 && m_FifoTrimWaitBudgetUs != 0 ?
                                     gateUs + m_FifoTrimWaitBudgetUs : 0;
+    // Depth 0: the follower of a lone host extra is rendered on arrival anyway.
+    const bool onArrival = m_FifoDepthEnabled && m_VsyncRenderer->fifoDepthOnArrival();
     bool waited = false;
     while (!m_Stopping && !m_RenderQueue.isEmpty()) {
         const AVFrame* head = m_RenderQueue.head();
@@ -394,6 +396,7 @@ void Pacer::applyFifoTrimLocked(uint64_t gateUs, IFFmpegRenderer::FramePacingInf
         in.headPts = static_cast<uint32_t>(head->pts);
         in.nowUs = nowUs;
         in.waitDeadlineUs = deadlineUs;
+        in.dropLoneSlotless = onArrival;
         const FifoTrimDecision d = m_FifoTrim.decide(in);
         if (d.action == FifoTrimAction::WaitForFollower) {
             waited = true;
@@ -404,7 +407,9 @@ void Pacer::applyFifoTrimLocked(uint64_t gateUs, IFFmpegRenderer::FramePacingInf
             nowUs = LiGetMicroseconds();
             continue;
         }
-        if (d.action != FifoTrimAction::Present && m_RenderQueue.count() >= 2) {
+        const bool lone = m_RenderQueue.count() < 2;
+        if (d.action != FifoTrimAction::Present &&
+            (!lone || (d.action == FifoTrimAction::DropSlotless && onArrival))) {
             AVFrame* stale = m_RenderQueue.dequeue();
             ++m_VideoStats->pacerDroppedFrames;
             ++m_DiagnosticDroppedFrames;
@@ -413,7 +418,7 @@ void Pacer::applyFifoTrimLocked(uint64_t gateUs, IFFmpegRenderer::FramePacingInf
             m_FifoTrim.dropped(d.action, nowUs);
             switch (d.action) {
             case FifoTrimAction::DropSlotless:
-                info.action = waited ? 7 : 3;
+                info.action = lone ? 9 : (waited ? 7 : 3);
                 break;
             case FifoTrimAction::DropRecovery:
                 info.action = 5;
@@ -428,10 +433,40 @@ void Pacer::applyFifoTrimLocked(uint64_t gateUs, IFFmpegRenderer::FramePacingInf
         }
         break;
     }
+
+    // Queue-depth controller: at most one drain to depth 0 per attempt.
+    if (m_FifoDepthEnabled && !m_Stopping && !m_RenderQueue.isEmpty()) {
+        const uint64_t headReadyUs = static_cast<uint64_t>(m_RenderQueue.head()->pkt_dts);
+        info.backlog = gateUs != 0 && headReadyUs != 0 && headReadyUs < gateUs;
+        const bool hostExtra = info.action == 3 || info.action == 7;
+        if (m_VsyncRenderer->fifoDepthGate(info.backlog, static_cast<int>(m_RenderQueue.count()), hostExtra)) {
+            while (!m_RenderQueue.isEmpty()) {
+                AVFrame* stale = m_RenderQueue.dequeue();
+                ++m_VideoStats->pacerDroppedFrames;
+                ++m_DiagnosticDroppedFrames;
+                ++info.drainDrops;
+                av_frame_free(&stale);
+            }
+            info.action = 8;
+            ++m_FifoDepthDrains;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "FIFO depth: drained one frame to reach depth 0%s",
+                        hostExtra ? " (next to a host extra)" : "");
+        }
+    }
+
+    // A depth-0 drop emptied the queue: render the next arrival.
+    if (m_RenderQueue.isEmpty() && (info.action == 8 || info.action == 9)) {
+        while (!m_Stopping && m_RenderQueue.isEmpty()) {
+            m_RenderQueueNotEmpty.wait(&m_FrameQueueLock);
+        }
+        nowUs = LiGetMicroseconds();
+        starved = FifoBacklogTrim::starvedSlot(gateUs, nowUs, m_FifoTrimPeriodUs);
+    }
     if (m_RenderQueue.isEmpty()) {
         return;
     }
-    if (info.action >= 3 && info.action < 8) {
+    if (info.action >= 3 && info.action < 10) {
         ++m_FifoTrimCounts[info.action];
         if (info.action == 6) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -445,9 +480,11 @@ void Pacer::applyFifoTrimLocked(uint64_t gateUs, IFFmpegRenderer::FramePacingInf
     if (nowUs - m_FifoTrimLogUs >= 60000000ull) {
         if (m_FifoTrimLogUs != 0) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "FIFO trim (60 s): slotless %u (after wait %u, kept %u), recovery %u, backlog %u",
-                        m_FifoTrimCounts[3] + m_FifoTrimCounts[7], m_FifoTrimCounts[7],
-                        m_FifoTrimCounts[4], m_FifoTrimCounts[5], m_FifoTrimCounts[6]);
+                        "FIFO trim (60 s): slotless %u (after wait %u, kept %u, lone at depth 0 %u), "
+                        "recovery %u, backlog %u, depth drains %u",
+                        m_FifoTrimCounts[3] + m_FifoTrimCounts[7] + m_FifoTrimCounts[9], m_FifoTrimCounts[7],
+                        m_FifoTrimCounts[4], m_FifoTrimCounts[9], m_FifoTrimCounts[5], m_FifoTrimCounts[6],
+                        m_FifoTrimCounts[8]);
         }
         std::fill(std::begin(m_FifoTrimCounts), std::end(m_FifoTrimCounts), 0u);
         m_FifoTrimLogUs = nowUs;
@@ -622,6 +659,11 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing,
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "FIFO trim: %s (follower wait %.1f ms)",
                 m_FifoTrimEnabled ? "slot-aware" : "queue history",
                 m_FifoTrimWaitBudgetUs / 1000.0);
+    // Queue-depth controller (render on arrival when the slack allows) rides
+    // on the slot-aware trim. MOONLIGHT_FIFO_DEPTH=0 disables it.
+    m_FifoDepthEnabled = m_FifoTrimEnabled && qgetenv("MOONLIGHT_FIFO_DEPTH") != "0";
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "FIFO depth controller: %s",
+                m_FifoDepthEnabled ? "enabled" : "off");
 #endif
     if (enablePacing && !rendererPacing) {
         SDL_SysWMinfo info;

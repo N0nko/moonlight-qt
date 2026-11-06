@@ -114,7 +114,10 @@ private:
     uint64_t m_FifoTrimPeriodUs = 0;
     uint64_t m_FifoTrimWaitBudgetUs = 0;
     uint64_t m_FifoTrimLogUs = 0;
-    uint32_t m_FifoTrimCounts[8] = {};
+    uint32_t m_FifoTrimCounts[10] = {};
+    // Queue-depth controller (FifoDepthController in the renderer).
+    bool m_FifoDepthEnabled = false;
+    uint32_t m_FifoDepthDrains = 0;
     std::atomic_bool m_SourceTimingEnabled{false};
     bool m_SourceTimingActive = false;
     SourceTimeline m_SourceTimeline;

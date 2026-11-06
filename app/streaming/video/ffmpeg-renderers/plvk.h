@@ -56,6 +56,8 @@ public:
     virtual bool isFifoDeadlineEnabled() override;
     virtual FifoPlan planFifoFrame(const uint64_t* readyUs, int count) override;
     virtual void setFramePacingInfo(const FramePacingInfo& info) override;
+    virtual bool fifoDepthOnArrival() override;
+    virtual bool fifoDepthGate(bool backlog, int queued, bool hostExtra) override;
     virtual void cleanupRenderContext() override;
     virtual void notifyOverlayUpdated(Overlay::OverlayType) override;
     virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO) override;
@@ -134,6 +136,13 @@ private:
         uint64_t marginNs = 0;
         int32_t displayRefreshes = 0;
         int32_t sourceRefreshes = 0;
+        // Queue-depth controller
+        uint8_t ctlState = 0;     // FifoDepthState at submit
+        bool backlog = false;     // head was queued before the gate
+        bool onArrival = false;   // rendered without waiting in the queue
+        uint64_t workNs = 0;      // decode-ready to submit + GPU
+        int64_t ctlSlackNs = 0;   // slack sample fed to the controller
+        int64_t ctlSlackLoNs = 0; // controller's p99.9 slack after this frame
     };
     void emitFifoRecord(const FifoRecord& record);
 #endif
@@ -299,6 +308,13 @@ private:
     uint32_t m_FifoSkips = 0;
     uint32_t m_FifoHostGaps = 0;
     uint32_t m_FifoRefreshes = 0;
+    // Queue-depth controller (MOONLIGHT_FIFO_DEPTH=0 disables it).
+    FifoDepthController m_FifoDepth;
+    bool m_FifoDepthAllowed = false;
+    uint64_t m_PrevReadyNs = 0;
+    uint32_t m_PrevReadyPts = 0;
+    uint32_t m_FifoDepthGates[3] = {};
+    uint32_t m_FifoDepthBacklogGates = 0;
     uint64_t m_FifoWindowStartNs = 0;
     FifoTraceWriter* m_FifoTrace = nullptr;
 #endif

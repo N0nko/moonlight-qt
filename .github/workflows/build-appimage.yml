@@ -180,6 +180,8 @@ jobs:
           /tmp/fifodepth-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror tests/fifotrim_test.cpp -o /tmp/fifotrim-test
           /tmp/fifotrim-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror tests/fifodepthctl_test.cpp -o /tmp/fifodepthctl-test
+          /tmp/fifodepthctl-test
           mkdir -p /tmp/sdlaudio-build
           pushd /tmp/sdlaudio-build
           qmake6 "$GITHUB_WORKSPACE/tests/sdlaudio_test.pro"

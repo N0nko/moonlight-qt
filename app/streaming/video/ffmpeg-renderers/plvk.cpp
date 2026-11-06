@@ -80,7 +80,8 @@ private:
         fputs("present_id,pts,receive_ns,ready_ns,render_start_ns,submit_ns,gate_ns,gate_vblank_ns,"
               "gate_from_feedback,actual_ns,earliest_ns,desired_ns,margin_ns,to_vblank_ns,c_ns,"
               "frame_slack_ns,slack_lo_ns,lead_ns,render_ns,gpu_ns,queue_depth,drain_drops,other_drops,"
-              "action,depth,armed,cadence_ok,display_refreshes,source_refreshes,lost\n", m_File);
+              "action,depth,armed,cadence_ok,display_refreshes,source_refreshes,lost,"
+              "ctl_state,backlog,on_arrival,work_ns,ctl_slack_ns,ctl_slack_lo_ns\n", m_File);
         m_Thread = std::thread([this] { run(); });
     }
 
@@ -99,7 +100,7 @@ private:
                     static_cast<int64_t>(r.toVblankNs) - static_cast<int64_t>(r.marginNs) : 0;
                 fprintf(m_File,
                         "%u,%s%u,%llu,%llu,%llu,%llu,%llu,%llu,%d,%llu,%llu,%llu,%llu,%llu,%lld,"
-                        "%lld,%lld,%llu,%llu,%llu,%d,%u,%u,%u,%d,%d,%d,%d,%d,%u\n",
+                        "%lld,%lld,%llu,%llu,%llu,%d,%u,%u,%u,%d,%d,%d,%d,%d,%u,%u,%d,%d,%llu,%lld,%lld\n",
                         r.id, r.hasPts ? "" : "-", r.pts,
                         (unsigned long long)r.receiveNs, (unsigned long long)r.readyNs,
                         (unsigned long long)r.renderStartNs, (unsigned long long)r.submitNs,
@@ -112,7 +113,9 @@ private:
                         (unsigned long long)r.leadNs, (unsigned long long)r.renderNs,
                         (unsigned long long)r.gpuNs, r.queueDepth, r.drainDrops, r.otherDrops,
                         r.action, r.depth, r.armed ? 1 : 0, r.cadenceOk ? 1 : 0,
-                        r.displayRefreshes, r.sourceRefreshes, lost);
+                        r.displayRefreshes, r.sourceRefreshes, lost,
+                        static_cast<unsigned>(r.ctlState), r.backlog ? 1 : 0, r.onArrival ? 1 : 0,
+                        (unsigned long long)r.workNs, (long long)r.ctlSlackNs, (long long)r.ctlSlackLoNs);
             }
             rows.clear();
             fflush(m_File);
@@ -615,6 +618,9 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
             m_FifoObserve = m_FifoPresentationRequested && m_MaxPendingPresents == 1;
             m_FifoDeadlineActive = m_FifoObserve &&
                                    qEnvironmentVariable("MOONLIGHT_FIFO_DEADLINE", "1") != "0";
+            // The pacer drives the controller only with the slot-aware trim.
+            m_FifoDepthAllowed = m_FifoObserve && qgetenv("MOONLIGHT_FIFO_DEPTH") != "0" &&
+                                 qgetenv("MOONLIGHT_FIFO_TRIM") != "0";
             if (m_FifoObserve) {
                 bool marginValid = false;
                 const int marginUs = qEnvironmentVariableIntValue("MOONLIGHT_FIFO_DEADLINE_MARGIN_US",
@@ -1000,6 +1006,8 @@ void PlVkRenderer::resetPresentationTiming(VkSwapchainKHR swapchain)
     m_AdaptivePresentLead.reset();
     m_FifoPeriodNs = 0;
     m_FifoPolicy.reset(0);
+    m_FifoDepth.configure(0, false);
+    m_PrevReadyNs = 0;
     m_FifoRecords = {};
     m_PrevFeedbackValid = false;
     m_HasLastRenderedPts = false;
@@ -1182,6 +1190,7 @@ void PlVkRenderer::collectPresentationFeedback(VkSwapchainKHR swapchain)
             if (validated != 0) {
                 m_FifoPeriodNs = validated;
                 m_FifoPolicy.reset(validated);
+                m_FifoDepth.configure(validated, m_FifoDepthAllowed);
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "FIFO deadline: validated period %.3f ms (API %.3f ms, display %d Hz)",
                             validated / 1000000.0, cycle.refreshDuration / 1000000.0, m_FifoDisplayHz);
@@ -1428,6 +1437,8 @@ void PlVkRenderer::preparePresent(VkSwapchainKHR swapchain,
         record.drainDrops = static_cast<uint16_t>(std::min<uint32_t>(m_NextPacingInfo.drainDrops, 0xffff));
         record.otherDrops = static_cast<uint16_t>(std::min<uint32_t>(m_NextPacingInfo.otherDrops, 0xffff));
         record.action = m_NextPacingInfo.action;
+        record.backlog = m_NextPacingInfo.backlog;
+        record.ctlState = static_cast<uint8_t>(m_FifoDepth.state());
         record.depth = static_cast<int8_t>(m_FifoPolicy.depth());
         record.armed = m_FifoPolicy.armed();
         record.cadenceOk = m_FifoPolicy.cadenceOneToOne();
@@ -1538,6 +1549,17 @@ void PlVkRenderer::observeFifoFeedback(const VkPastPresentationTimingGOOGLE& tim
     record.marginNs = timing.presentMargin;
     const uint64_t observedNs = monotonicTimeNs();
     m_FifoPolicy.observeLatchOffset(timing.presentMargin, observedNs);
+    m_FifoDepth.observeLatchOffset(timing.presentMargin, observedNs);
+    // Slack this frame has (on arrival) or would have (backlog) at depth 0:
+    // decode-ready to the first latch after it, minus the on-arrival work.
+    if (m_FifoPeriodNs != 0 && record.readyNs != 0 && timing.presentMargin != 0 &&
+        timing.actualPresentTime > timing.presentMargin + record.readyNs) {
+        const uint64_t latchNs = timing.actualPresentTime - timing.presentMargin;
+        const uint64_t phaseNs = (latchNs - record.readyNs) % m_FifoPeriodNs;
+        record.ctlSlackNs = m_FifoDepth.observeFrame(phaseNs, record.onArrival, record.workNs);
+        record.ctlSlackLoNs = m_FifoDepth.slackSamples() >= FifoDepthController::kMinSlackSamples ?
+                                  m_FifoDepth.slackLoNs() : 0;
+    }
 
     const uint64_t period = m_FifoPeriodNs;
     if (period != 0 && record.hasPts && m_PrevFeedbackValid) {
@@ -1553,6 +1575,7 @@ void PlVkRenderer::observeFifoFeedback(const VkPastPresentationTimingGOOGLE& tim
         if (error > 0) {
             m_FifoRepeats += static_cast<uint32_t>(error);
             m_FifoPolicy.observeMiss(observedNs);
+            m_FifoDepth.observeRepeat(observedNs);
         }
         else if (error < 0) {
             m_FifoSkips += static_cast<uint32_t>(-error);
@@ -1562,6 +1585,7 @@ void PlVkRenderer::observeFifoFeedback(const VkPastPresentationTimingGOOGLE& tim
         if (sourceRefreshes > 1 + clientDrops) {
             m_FifoHostGaps += sourceRefreshes - 1 - clientDrops;
             m_FifoPolicy.observeDisturbance(observedNs);
+            m_FifoDepth.observeDisturbance(observedNs);
         }
     }
     if (record.hasPts) {
@@ -1590,6 +1614,22 @@ void PlVkRenderer::logFifoDeadline()
                 m_FifoRepeats, m_FifoSkips, m_FifoHostGaps, m_FifoRefreshes, p.holdNs() / 1e9);
     m_FifoBacklogFrames = m_FifoDrains = m_FifoWaits = m_FifoAborts = 0;
     m_FifoRepeats = m_FifoSkips = m_FifoHostGaps = m_FifoRefreshes = 0;
+
+    FifoDepthController& d = m_FifoDepth;
+    const uint32_t gates = m_FifoDepthGates[0] + m_FifoDepthGates[1] + m_FifoDepthGates[2];
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "FIFO depth: %s, state %s, depth-0 gates %.1f%%, backlog gates %.1f%%, "
+                "slack p99.9 %.3f ms (n %zu, work n %zu), drain ready %d, attempts %u, free entries %u, "
+                "exits late %u / backlog %u, hold %.0f s",
+                d.state() == FifoDepthState::Off ? "off" : "on",
+                d.state() == FifoDepthState::OnArrival ? "depth 0" : "depth 1",
+                gates ? 100.0 * m_FifoDepthGates[2] / gates : 0.0,
+                gates ? 100.0 * m_FifoDepthBacklogGates / gates : 0.0,
+                d.slackLoNs() / 1000000.0, d.slackSamples(), d.workSamples(),
+                d.drainReady(monotonicTimeNs()) ? 1 : 0, d.attempts(), d.freeEntries(),
+                d.lateExits(), d.backlogExits(), d.holdNs() / 1e9);
+    m_FifoDepthGates[0] = m_FifoDepthGates[1] = m_FifoDepthGates[2] = 0;
+    m_FifoDepthBacklogGates = 0;
 }
 #endif
 
@@ -2063,6 +2103,14 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
                 m_FifoPolicy.observeCadence(fifoOneToOneDelta(m_PendingPts - m_LastRenderedPts,
                                                               m_FifoPeriodNs));
             }
+            if (m_PendingDecodeReadyNs != 0 && m_PrevReadyNs != 0 && m_PendingHasPts &&
+                m_PendingDecodeReadyNs > m_PrevReadyNs && m_FifoDisplayHz > 0) {
+                m_FifoDepth.observeArrival(m_PendingDecodeReadyNs - m_PrevReadyNs,
+                                           m_PendingPts - m_PrevReadyPts,
+                                           static_cast<uint32_t>(90000 / m_FifoDisplayHz));
+            }
+            m_PrevReadyNs = m_PendingHasPts ? m_PendingDecodeReadyNs : 0;
+            m_PrevReadyPts = m_PendingPts;
         }
         m_LastRenderedPts = m_PendingPts;
         m_HasLastRenderedPts = m_PendingHasPts;
@@ -2097,6 +2145,12 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         if (record.id == m_LastSubmittedTimingId && record.id != 0) {
             record.renderNs = renderNs;
             record.gpuNs = m_FrameGpuNs;
+            // Rendered on arrival: the queue was empty when the gate opened.
+            if (record.readyNs != 0 && record.gateNs != 0 && record.readyNs > record.gateNs &&
+                m_RenderStartNs >= record.readyNs && m_RenderStartNs - record.readyNs < 1000000) {
+                record.onArrival = true;
+                record.workNs = m_RenderStartNs + renderNs - record.readyNs;
+            }
         }
         const bool cadence = m_FifoPolicy.cadenceOneToOne();
         m_FifoPolicy.evaluate(nowNs);
@@ -2358,6 +2412,48 @@ void PlVkRenderer::setFramePacingInfo(const FramePacingInfo& info)
     m_NextPacingInfo = info;
 #else
     Q_UNUSED(info);
+#endif
+}
+
+bool PlVkRenderer::fifoDepthOnArrival()
+{
+#ifdef Q_OS_LINUX
+    return m_FifoDepth.onArrival();
+#else
+    return false;
+#endif
+}
+
+bool PlVkRenderer::fifoDepthGate(bool backlog, int queued, bool hostExtra)
+{
+#ifdef Q_OS_LINUX
+    if (m_FifoDepth.state() == FifoDepthState::Off || m_MaxPendingPresents != 1 ||
+        m_PresentsWithoutFeedback > 8) {
+        return false;
+    }
+    FifoDepthGate in;
+    in.backlog = backlog;
+    in.queued = queued;
+    in.hostExtra = hostExtra;
+    in.nowNs = monotonicTimeNs();
+    const FifoDepthState before = m_FifoDepth.state();
+    const bool drain = m_FifoDepth.gate(in);
+    const FifoDepthState after = m_FifoDepth.state();
+    ++m_FifoDepthGates[static_cast<int>(after)];
+    if (backlog) {
+        ++m_FifoDepthBacklogGates;
+    }
+    if (before != after && !drain) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "FIFO depth: %s (slack p99.9 %.3f ms)",
+                    after == FifoDepthState::OnArrival ? "depth 0 after a host gap" : "back to depth 1",
+                    m_FifoDepth.slackLoNs() / 1000000.0);
+    }
+    return drain;
+#else
+    Q_UNUSED(backlog);
+    Q_UNUSED(queued);
+    Q_UNUSED(hostExtra);
+    return false;
 #endif
 }
 

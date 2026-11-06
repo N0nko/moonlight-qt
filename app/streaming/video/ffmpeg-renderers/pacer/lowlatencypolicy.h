@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cstdint>
 
 // Bound presentations still owned by the compositor, not GPU submissions.
@@ -142,7 +143,8 @@ private:
 //  3. Drift backstop: drop one frame only after every dequeue for a long hold
 //     had a backlog (depth >= 2), or depth >= 3 for a shorter hold. Host gaps
 //     already drain a backlog for free, so this rarely fires.
-// Never more than one drop per dequeue, and never the last queued frame.
+// Never more than one drop per dequeue, and never the last queued frame (except
+// a lone slotless head at depth 0, see FifoTrimInput::dropLoneSlotless).
 enum class FifoTrimAction : uint8_t {
     Present,          // submit the head
     DropSlotless,     // drop the head; the follower owns the slot
@@ -157,6 +159,10 @@ struct FifoTrimInput {
     uint32_t headPts = 0;       // RTP 90 kHz
     uint64_t nowUs = 0;
     uint64_t waitDeadlineUs = 0;// latest time to hold a slotless head; 0 = never wait
+    // Depth 0 (FifoDepthController): frames are rendered on arrival and the
+    // follower of a lone slotless head will make the next latch. Drop the head
+    // (the caller then waits for the follower) instead of showing a near-repeat.
+    bool dropLoneSlotless = false;
 };
 
 struct FifoTrimDecision {
@@ -207,7 +213,7 @@ public:
             return d;
         }
         if (slotless(in)) {
-            if (in.depth >= 2) {
+            if (in.depth >= 2 || in.dropLoneSlotless) {
                 d.action = FifoTrimAction::DropSlotless;
             }
             else if (in.waitDeadlineUs > in.nowUs) {
@@ -280,4 +286,299 @@ private:
     uint64_t m_Depth2SinceUs = 0;
     uint64_t m_Depth3SinceUs = 0;
     int m_RecoveryLeft = 0;
+};
+
+// FIFO queue-depth controller (FIFO profile, stream fps == refresh rate).
+//
+// With the one-present gate, decode-ready to scanout is c + O + k*T: c is the
+// arrival phase (decode-ready to the next Gamescope latch), O the latch offset
+// (presentMargin) and k the standing backlog at the gate. Both k = 1 (every
+// frame waits for the gate behind its predecessor) and k = 0 (every frame is
+// rendered on arrival and makes the very next latch) are stable; which one a
+// session sits in depends on its history. k = 0 saves one refresh but needs
+// every frame done (submit + GPU) before the latch: slack = c - work > 0.
+//
+// The controller never sleeps toward a deadline. It
+//  - measures per-frame slack: real for frames rendered on arrival; for
+//    backlog frames, the frame's phase minus a recent on-arrival work sample;
+//  - spends ONE drop to reach depth 0 when the backlog is one frame, the
+//    p99.9 slack over >= 2000 frames is above 1.5 ms, and no host gap, stall,
+//    repeat or latch-offset jump happened for 10 s; preferably at a gate where
+//    the trim drops a host capture extra, so the skip lands next to the host's
+//    own hiccup;
+//  - returns to depth 1 at the first late frame (a repeat; the queue refills
+//    by itself) and allows at most one attempt per 60 s, backing off when an
+//    attempt ends within a minute.
+// A host gap drains the backlog for free; with good slack that counts as an
+// entry to depth 0 without an attempt.
+enum class FifoDepthState : uint8_t {
+    Off = 0,       // not configured or disabled
+    Backlog = 1,   // depth 1: frames wait for the gate
+    OnArrival = 2, // depth 0: frames are rendered on arrival
+};
+
+struct FifoDepthGate {
+    bool backlog = false;   // the head was queued before the gate opened
+    int queued = 0;         // frames queued after the trim, head included
+    bool hostExtra = false; // the trim dropped a host capture extra at this gate
+    uint64_t nowNs = 0;
+};
+
+class FifoDepthController {
+public:
+    static constexpr size_t kSlackWindow = 2048;
+    static constexpr size_t kMinSlackSamples = 2000;
+    static constexpr size_t kWorkWindow = 2048;
+    static constexpr size_t kMinWorkSamples = 64;
+    static constexpr uint64_t kSecond = 1000000000ull;
+    static constexpr int64_t kRequiredSlackNs = 1500000;
+    static constexpr uint64_t kDefaultWorkNs = 6500000;      // until kMinWorkSamples (never drains on it)
+    static constexpr uint64_t kQuietNs = 10 * kSecond;
+    static constexpr uint64_t kAttemptHoldNs = 60 * kSecond;
+    static constexpr uint64_t kMaxAttemptHoldNs = 480 * kSecond;
+    static constexpr uint64_t kStableNs = 300 * kSecond;     // a depth-0 run this long resets the backoff
+    static constexpr uint64_t kPreferExtraNs = 20 * kSecond; // then drain at any eligible gate
+    static constexpr uint64_t kLatchJumpNs = 500000;
+    static constexpr size_t kLatchWindow = 256;
+    static constexpr int kExitBacklogGates = 4;
+
+    void configure(uint64_t periodNs, bool enabled)
+    {
+        *this = FifoDepthController();
+        m_PeriodNs = periodNs;
+        m_Enabled = enabled && periodNs != 0;
+        m_State = m_Enabled ? FifoDepthState::Backlog : FifoDepthState::Off;
+    }
+
+    FifoDepthState state() const { return m_State; }
+    bool onArrival() const { return m_State == FifoDepthState::OnArrival; }
+    uint64_t periodNs() const { return m_PeriodNs; }
+
+    // One presented frame at feedback. phaseNs: decode-ready to the first latch
+    // after it, in [0, T). onArrival: rendered without waiting in the queue,
+    // so workNs (decode-ready to submit + GPU) is its real cost. Returns the
+    // slack sample (negative: that frame would miss the latch at depth 0).
+    int64_t observeFrame(uint64_t phaseNs, bool onArrival, uint64_t workNs)
+    {
+        if (m_PeriodNs == 0 || phaseNs >= m_PeriodNs) {
+            return 0;
+        }
+        uint64_t work = workNs;
+        if (onArrival && workNs != 0 && workNs < 2 * m_PeriodNs) {
+            m_Work[m_WorkNext] = static_cast<uint32_t>(workNs);
+            m_WorkNext = (m_WorkNext + 1) % kWorkWindow;
+            m_WorkCount = std::min(m_WorkCount + 1, kWorkWindow);
+        }
+        else {
+            // A backlog frame's own work excludes the decode it finished while
+            // queued: pair its phase with a recent on-arrival work sample,
+            // cycling so each sample is used about once per slack window.
+            if (m_WorkCount >= kMinWorkSamples) {
+                m_Pick = (m_Pick + 1) % m_WorkCount;
+                work = m_Work[m_Pick];
+            }
+            else {
+                work = kDefaultWorkNs;
+            }
+        }
+        const int64_t slack = static_cast<int64_t>(phaseNs) - static_cast<int64_t>(work);
+        m_Slack[m_SlackNext] = static_cast<int32_t>(std::max<int64_t>(std::min<int64_t>(slack, INT32_MAX), INT32_MIN));
+        m_SlackNext = (m_SlackNext + 1) % kSlackWindow;
+        m_SlackCount = std::min(m_SlackCount + 1, kSlackWindow);
+        m_SlackDirty = true;
+        return slack;
+    }
+
+    // A client-visible repeat: at depth 0 that frame was late and the queue
+    // refills by itself, so the stream is back at depth 1.
+    void observeRepeat(uint64_t nowNs)
+    {
+        m_LastRepeatNs = nowNs;
+        if (m_State == FifoDepthState::OnArrival) {
+            leaveOnArrival(nowNs, true);
+        }
+    }
+
+    // Host gap, Wi-Fi stall or compositor disturbance.
+    void observeDisturbance(uint64_t nowNs) { m_LastDisturbanceNs = nowNs; }
+
+    // Gamescope's presentMargin; a jump to an earlier latch is a disturbance.
+    void observeLatchOffset(uint64_t marginNs, uint64_t nowNs)
+    {
+        if (m_PeriodNs == 0 || marginNs == 0 || marginNs >= m_PeriodNs) {
+            return;
+        }
+        if (m_LatchCount >= 64) {
+            if (m_LatchDirty) {
+                std::array<uint32_t, kLatchWindow> sorted = m_Latch;
+                std::nth_element(sorted.begin(), sorted.begin() + m_LatchCount / 2, sorted.begin() + m_LatchCount);
+                m_LatchMedNs = sorted[m_LatchCount / 2];
+                m_LatchDirty = false;
+            }
+            if (marginNs > m_LatchMedNs + kLatchJumpNs) {
+                observeDisturbance(nowNs);
+            }
+        }
+        m_Latch[m_LatchNext] = static_cast<uint32_t>(marginNs);
+        m_LatchNext = (m_LatchNext + 1) % kLatchWindow;
+        m_LatchCount = std::min(m_LatchCount + 1, kLatchWindow);
+        if (m_LatchNext % 32 == 0) {
+            m_LatchDirty = true;
+        }
+    }
+
+    // A decoded frame became ready gapNs after its predecessor, ptsTicks later
+    // in source time. A late arrival without a source gap is a network stall;
+    // it is applied at the next gate.
+    void observeArrival(uint64_t gapNs, uint32_t ptsTicks, uint32_t slotTicks)
+    {
+        if (m_PeriodNs != 0 && slotTicks != 0 && gapNs > m_PeriodNs + m_PeriodNs / 2 &&
+            static_cast<uint64_t>(ptsTicks) * 2 < static_cast<uint64_t>(slotTicks) * 3) {
+            m_StallPending = true;
+        }
+    }
+
+    // p99.9 of the slack window (its 0.1th percentile), recomputed lazily.
+    int64_t slackLoNs()
+    {
+        if (m_SlackDirty && m_SlackCount != 0) {
+            std::array<int32_t, kSlackWindow> sorted = m_Slack;
+            const size_t k = m_SlackCount / 1000;
+            std::nth_element(sorted.begin(), sorted.begin() + k, sorted.begin() + m_SlackCount);
+            m_SlackLoNs = sorted[k];
+            m_SlackDirty = false;
+        }
+        return m_SlackCount != 0 ? m_SlackLoNs : 0;
+    }
+    size_t slackSamples() const { return m_SlackCount; }
+    size_t workSamples() const { return m_WorkCount; }
+
+    // Needs real on-arrival work samples: backlog frames alone cannot show
+    // what rendering on arrival costs (the decode they finished while queued).
+    bool slackOk()
+    {
+        return m_SlackCount >= kMinSlackSamples && m_WorkCount >= kMinWorkSamples &&
+               slackLoNs() > kRequiredSlackNs;
+    }
+
+    // Every condition for a deliberate drain except the backlog shape.
+    bool drainReady(uint64_t nowNs)
+    {
+        return m_Enabled && slackOk() && quietSince(m_LastDisturbanceNs, nowNs, kQuietNs) &&
+               quietSince(m_LastRepeatNs, nowNs, kQuietNs) &&
+               quietSince(m_LastAttemptNs, nowNs, m_HoldNs);
+    }
+
+    // Called at every present gate after the trim. Returns true when the
+    // caller must drop every queued frame (one) and render the next arrival:
+    // the one-time drain to depth 0.
+    bool gate(const FifoDepthGate& in)
+    {
+        if (!m_Enabled) {
+            return false;
+        }
+        if (m_StallPending) {
+            m_StallPending = false;
+            observeDisturbance(in.nowNs);
+        }
+        if (!in.backlog) {
+            m_BacklogRun = 0;
+            if (m_State == FifoDepthState::Backlog && slackOk()) {
+                // A host gap emptied the queue: depth 0 for free.
+                enterOnArrival(in.nowNs, false);
+            }
+        }
+        else if (m_State == FifoDepthState::OnArrival && ++m_BacklogRun >= kExitBacklogGates) {
+            leaveOnArrival(in.nowNs, false);
+        }
+        if (m_State != FifoDepthState::Backlog || !in.backlog || in.queued != 1 ||
+            !drainReady(in.nowNs)) {
+            m_ReadySinceNs = 0;
+            return false;
+        }
+        if (m_ReadySinceNs == 0) {
+            m_ReadySinceNs = in.nowNs;
+        }
+        if (!in.hostExtra && in.nowNs - m_ReadySinceNs < kPreferExtraNs) {
+            return false;
+        }
+        m_LastAttemptNs = in.nowNs;
+        ++m_Attempts;
+        enterOnArrival(in.nowNs, true);
+        return true;
+    }
+
+    uint32_t attempts() const { return m_Attempts; }
+    uint32_t freeEntries() const { return m_FreeEntries; }
+    uint32_t lateExits() const { return m_LateExits; }
+    uint32_t backlogExits() const { return m_BacklogExits; }
+    uint64_t holdNs() const { return m_HoldNs; }
+
+private:
+    static bool quietSince(uint64_t eventNs, uint64_t nowNs, uint64_t quietNs)
+    {
+        return eventNs == 0 || (nowNs >= eventNs && nowNs - eventNs >= quietNs);
+    }
+
+    void enterOnArrival(uint64_t nowNs, bool attempt)
+    {
+        m_State = FifoDepthState::OnArrival;
+        m_OnArrivalSinceNs = nowNs;
+        m_FromAttempt = attempt;
+        m_BacklogRun = 0;
+        m_ReadySinceNs = 0;
+        if (!attempt) {
+            ++m_FreeEntries;
+        }
+    }
+
+    void leaveOnArrival(uint64_t nowNs, bool late)
+    {
+        const uint64_t lasted = nowNs >= m_OnArrivalSinceNs ? nowNs - m_OnArrivalSinceNs : 0;
+        if (m_FromAttempt && lasted < kAttemptHoldNs) {
+            m_HoldNs = std::min(m_HoldNs * 2, kMaxAttemptHoldNs);
+        }
+        else if (lasted >= kStableNs) {
+            m_HoldNs = kAttemptHoldNs;
+        }
+        m_State = FifoDepthState::Backlog;
+        m_BacklogRun = 0;
+        if (late) {
+            ++m_LateExits;
+        }
+        else {
+            ++m_BacklogExits;
+        }
+    }
+
+    bool m_Enabled = false;
+    FifoDepthState m_State = FifoDepthState::Off;
+    uint64_t m_PeriodNs = 0;
+    std::array<int32_t, kSlackWindow> m_Slack{};
+    size_t m_SlackNext = 0;
+    size_t m_SlackCount = 0;
+    bool m_SlackDirty = false;
+    int64_t m_SlackLoNs = 0;
+    std::array<uint32_t, kWorkWindow> m_Work{};
+    size_t m_WorkNext = 0;
+    size_t m_WorkCount = 0;
+    size_t m_Pick = 0;
+    std::array<uint32_t, kLatchWindow> m_Latch{};
+    size_t m_LatchNext = 0;
+    size_t m_LatchCount = 0;
+    bool m_LatchDirty = true;
+    uint64_t m_LatchMedNs = 0;
+    bool m_StallPending = false;
+    uint64_t m_LastDisturbanceNs = 0;
+    uint64_t m_LastRepeatNs = 0;
+    uint64_t m_LastAttemptNs = 0;
+    uint64_t m_HoldNs = kAttemptHoldNs;
+    uint64_t m_ReadySinceNs = 0;
+    uint64_t m_OnArrivalSinceNs = 0;
+    bool m_FromAttempt = false;
+    int m_BacklogRun = 0;
+    uint32_t m_Attempts = 0;
+    uint32_t m_FreeEntries = 0;
+    uint32_t m_LateExits = 0;
+    uint32_t m_BacklogExits = 0;
 };
