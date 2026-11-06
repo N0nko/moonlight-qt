@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <climits>
+#include <cmath>
 #include <cstdint>
 
 // Bound presentations still owned by the compositor, not GPU submissions.
@@ -341,6 +342,8 @@ public:
     static constexpr uint64_t kLatchJumpNs = 500000;
     static constexpr size_t kLatchWindow = 256;
     static constexpr int kExitBacklogGates = 4;
+    static constexpr uint64_t kPhaseWindow = 256;
+    static constexpr uint64_t kEarlyToleranceNs = 1500000;
 
     void configure(uint64_t periodNs, bool enabled)
     {
@@ -363,6 +366,35 @@ public:
         if (m_PeriodNs == 0 || phaseNs >= m_PeriodNs) {
             return 0;
         }
+        // Arrival delay is one-sided: frames cluster just below an early
+        // edge and trail off late (smaller phase). A frame later than its
+        // phase wraps past 0 to a large phase and would look safe; unwrap any
+        // phase more than kEarlyToleranceNs above the session's circular mean
+        // into a negative one (late for its own latch).
+        int64_t phase = static_cast<int64_t>(phaseNs);
+        {
+            constexpr double kTwoPi = 6.283185307179586;
+            const double angle = kTwoPi * static_cast<double>(phaseNs) / static_cast<double>(m_PeriodNs);
+            const double alpha = m_PhaseCount < kPhaseWindow ? 1.0 / static_cast<double>(m_PhaseCount + 1) :
+                                                               1.0 / static_cast<double>(kPhaseWindow);
+            m_PhaseCos += alpha * (std::cos(angle) - m_PhaseCos);
+            m_PhaseSin += alpha * (std::sin(angle) - m_PhaseSin);
+            ++m_PhaseCount;
+            if (m_PhaseCount >= kPhaseWindow &&
+                m_PhaseCos * m_PhaseCos + m_PhaseSin * m_PhaseSin > 0.25) {
+                double centre = std::atan2(m_PhaseSin, m_PhaseCos) / kTwoPi * static_cast<double>(m_PeriodNs);
+                if (centre < 0) {
+                    centre += static_cast<double>(m_PeriodNs);
+                }
+                const double top = centre + static_cast<double>(kEarlyToleranceNs);
+                if (static_cast<double>(phase) >= top) {
+                    phase -= static_cast<int64_t>(m_PeriodNs);
+                }
+                else if (static_cast<double>(phase) < top - static_cast<double>(m_PeriodNs)) {
+                    phase += static_cast<int64_t>(m_PeriodNs);
+                }
+            }
+        }
         uint64_t work = workNs;
         if (onArrival && workNs != 0 && workNs < 2 * m_PeriodNs) {
             m_Work[m_WorkNext] = static_cast<uint32_t>(workNs);
@@ -381,7 +413,7 @@ public:
                 work = kDefaultWorkNs;
             }
         }
-        const int64_t slack = static_cast<int64_t>(phaseNs) - static_cast<int64_t>(work);
+        const int64_t slack = phase - static_cast<int64_t>(work);
         m_Slack[m_SlackNext] = static_cast<int32_t>(std::max<int64_t>(std::min<int64_t>(slack, INT32_MAX), INT32_MIN));
         m_SlackNext = (m_SlackNext + 1) % kSlackWindow;
         m_SlackCount = std::min(m_SlackCount + 1, kSlackWindow);
@@ -559,6 +591,9 @@ private:
     size_t m_SlackCount = 0;
     bool m_SlackDirty = false;
     int64_t m_SlackLoNs = 0;
+    double m_PhaseCos = 0;
+    double m_PhaseSin = 0;
+    uint64_t m_PhaseCount = 0;
     std::array<uint32_t, kWorkWindow> m_Work{};
     size_t m_WorkNext = 0;
     size_t m_WorkCount = 0;

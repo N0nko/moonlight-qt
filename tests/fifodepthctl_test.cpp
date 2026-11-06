@@ -91,6 +91,23 @@ void unitSlackWindow()
     assert(!c.slackOk());
 }
 
+void unitLateFramesDoNotWrap()
+{
+    // Frames normally ready 2.6 ms before the latch. One delayed by 4 ms is
+    // 1.4 ms past its latch: its raw phase (9.7 ms) must not read as slack.
+    FifoDepthController c;
+    c.configure(kTns, true);
+    feed(c, 300, 2600000, 2000000, true);
+    assert(c.observeFrame(kTns - 1400000, true, 2000000) == -1400000 - 2000000);
+    // Just above the usual arrival (early side, within the tolerance) is kept.
+    assert(c.observeFrame(3600000, true, 2000000) == 1600000);
+    // A session sitting high (9.6 ms) keeps its late tail as small phases.
+    c.configure(kTns, true);
+    feed(c, 300, 9600000, 3000000, true);
+    assert(c.observeFrame(500000, true, 3000000) == 500000 - 3000000);
+    assert(c.observeFrame(10500000, true, 3000000) == 7500000);
+}
+
 void unitBacklogPairsWithWork()
 {
     FifoDepthController c;
@@ -634,6 +651,7 @@ int main()
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     unitOff();
     unitSlackWindow();
+    unitLateFramesDoNotWrap();
     unitBacklogPairsWithWork();
     unitDrainAtExtra();
     unitDrainWithoutExtraAfter20s();
